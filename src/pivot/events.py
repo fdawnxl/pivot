@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import operator
 import importlib.util
+import json
 import logging
+import subprocess
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
@@ -18,6 +20,49 @@ LOGGER = logging.getLogger(__name__)
 
 class EventError(RuntimeError):
     """Raised for invalid definitions or event operations."""
+
+
+class EventScriptRunner:
+    """Execute event scripts through their dedicated uv project."""
+
+    def __init__(self, environment: str, *, timeout: float = 15.0, uv_binary: str = "uv") -> None:
+        self.environment = environment
+        self.timeout = timeout
+        self.uv_binary = uv_binary
+
+    def _run(self, script: str, arguments: list[str]) -> object:
+        command = [self.uv_binary, "run", "--project", self.environment, "python", script, *arguments]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise EventError(f"Event script execution failed: {type(exc).__name__}") from exc
+        if result.returncode != 0:
+            detail = result.stderr.strip()[-500:] or "no error detail"
+            raise EventError(f"Event script failed with code {result.returncode}: {detail}")
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise EventError(f"Event script returned invalid JSON: {exc.msg}") from exc
+
+    def list_events(self, script: str) -> tuple[EventDescriptor, ...]:
+        value = self._run(script, ["-l"])
+        if not isinstance(value, list):
+            raise EventError("Event -l response must be a JSON list")
+        result = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise EventError("Event descriptor must be a JSON object")
+            try:
+                result.append(EventDescriptor(str(item["name"]), str(item["description"]), str(item["field"]), str(item["operator"]), item.get("expected"), script))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise EventError("Event descriptor is missing required fields") from exc
+        return tuple(result)
+
+    def poll(self, script: str) -> dict[str, object]:
+        value = self._run(script, ["-p"])
+        if not isinstance(value, dict):
+            raise EventError("Event -p response must be a JSON object")
+        return {str(key): item for key, item in value.items()}
 
 
 OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
@@ -124,3 +169,46 @@ def load_event_scripts(root: str) -> tuple[EventDescriptor, ...]:
         except Exception as exc:
             LOGGER.warning("Unable to load event script %s: %s", script, exc)
     return tuple(descriptors)
+
+
+def load_event_scripts_isolated(root: str, runner: EventScriptRunner) -> tuple[EventDescriptor, ...]:
+    """Load event metadata without importing untrusted scripts in the framework process."""
+
+    from pathlib import Path
+
+    result: list[EventDescriptor] = []
+    for script in sorted(Path(root).expanduser().glob("*.py")):
+        try:
+            result.extend(runner.list_events(str(script)))
+        except EventError as exc:
+            LOGGER.warning("Unable to load isolated event script %s: %s", script, exc)
+    return tuple(result)
+
+
+class EventSupervisor:
+    """Poll isolated event scripts and report matching payloads to an EventPool."""
+
+    def __init__(self, pool: EventPool, root: str, runner: EventScriptRunner) -> None:
+        self.pool = pool
+        self.root = root
+        self.runner = runner
+
+    def poll_once(self) -> dict[str, tuple[str, ...]]:
+        results: dict[str, tuple[str, ...]] = {}
+        from pathlib import Path
+
+        for script in sorted(Path(self.root).expanduser().glob("*.py")):
+            try:
+                payload = self.runner.poll(str(script))
+            except EventError as exc:
+                LOGGER.warning("Unable to poll isolated event script %s: %s", script, exc)
+                continue
+            for event in self.pool.descriptors():
+                if event.source == str(script):
+                    try:
+                        notified = self.pool.report(event.name, payload)
+                    except EventError as exc:
+                        LOGGER.warning("Unable to report event %s: %s", event.name, exc)
+                        continue
+                    results[event.name] = notified
+        return results

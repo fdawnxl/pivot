@@ -25,11 +25,13 @@ class LiteLLMClient:
         model: str,
         *,
         api_base: str | None = None,
+        api_key: str | None = None,
         timeout: float = 120.0,
         completion: Callable[..., Any] | None = None,
     ) -> None:
         self.model = model
         self.api_base = api_base
+        self.api_key = api_key
         self.timeout = timeout
         self._completion = completion
 
@@ -48,6 +50,8 @@ class LiteLLMClient:
         }
         if self.api_base:
             kwargs["api_base"] = self.api_base
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
         if tools:
             kwargs["tools"] = list(tools)
         try:

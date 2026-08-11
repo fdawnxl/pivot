@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from pivot.capabilities import CapabilityError, CapabilityRegistry
+from pivot.capabilities.discovery import register_workspace_capabilities
 from pivot.models import CapabilityDescriptor, ToolCall
 from pivot.parser import ResponseParseError, parse_response
 
@@ -32,3 +33,21 @@ def test_measure_runner_rejects_missing_script(tmp_path: Path) -> None:
 
     with pytest.raises(CapabilityError):
         MeasureRunner(tmp_path).list_features(tmp_path / "missing.py")
+
+
+def test_workspace_capability_discovery_loads_all_kinds(tmp_path: Path) -> None:
+    workspace = tmp_path
+    for kind in ("think", "measure", "work"):
+        (workspace / "capabilities" / kind).mkdir(parents=True)
+    (workspace / "capabilities" / "think" / "a.py").write_text(
+        "from pivot.models import CapabilityDescriptor\nDESCRIPTOR = CapabilityDescriptor('t', 'think', 't')\n", encoding="utf-8"
+    )
+    (workspace / "capabilities" / "work" / "b.py").write_text(
+        "from pivot.models import CapabilityDescriptor\nDESCRIPTOR = CapabilityDescriptor('w', 'work', 'w')\ndef handle(): return 'ok'\n", encoding="utf-8"
+    )
+    (workspace / "capabilities" / "measure" / "c.py").write_text(
+        "DESCRIPTOR = {'name': 'm', 'description': 'm', 'parameters': {}}\n", encoding="utf-8"
+    )
+    registry = CapabilityRegistry()
+    register_workspace_capabilities(workspace, registry, workspace / "measure-env")
+    assert {item.kind for item in registry.descriptors()} == {"think", "measure", "work"}

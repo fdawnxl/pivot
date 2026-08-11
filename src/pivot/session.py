@@ -11,7 +11,7 @@ from .capabilities import CapabilityError, CapabilityRegistry
 from .events import EventPool
 from .llm import LLMClient
 from .memory import TextMemory
-from .models import EventDescriptor, Message, ParsedResponse
+from .models import Message, ToolCall
 from .parser import ResponseParseError, parse_response
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +43,30 @@ class ConversationSession:
         self.events = events
         self.max_rounds = max_rounds
         self.history: list[Message] = []
+        self._restore()
+
+    def _restore(self) -> None:
+        """Restore valid JSON-lines history while isolating corrupt memory files."""
+
+        if not self.memory:
+            return
+        try:
+            content = self.memory.read(self.session_id)
+            restored: list[Message] = []
+            for line in content.splitlines():
+                value = json.loads(line)
+                calls = []
+                for raw_call in value.get("tool_calls", []):
+                    function = raw_call.get("function", raw_call)
+                    arguments = function.get("arguments", {})
+                    if isinstance(arguments, str):
+                        arguments = json.loads(arguments)
+                    calls.append(ToolCall(function["name"], arguments, raw_call.get("id")))
+                restored.append(Message(value["role"], value.get("content"), value.get("name"), tuple(calls), value.get("tool_call_id")))
+            self.history = restored
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            LOGGER.warning("Unable to restore session %s memory; starting a new context: %s", self.session_id, exc)
+            self.history = []
 
     def _context_message(self) -> Message:
         event_context: Sequence[dict[str, Any]] = ()

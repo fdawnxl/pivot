@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from pivot.capabilities import CapabilityRegistry
-from pivot.events import EventPool
+from pivot.events import EventPool, EventScriptRunner, EventSupervisor, load_event_scripts_isolated
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, EventDescriptor
 from pivot.session import ConversationSession
@@ -24,6 +24,8 @@ def test_session_executes_tools_and_persists(tmp_path: Path) -> None:
     session = ConversationSession("s1", llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
     assert session.run("hello") == "finished"
     assert "finished" in (tmp_path / "s1.txt").read_text(encoding="utf-8")
+    restored = ConversationSession("s1", llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
+    assert len(restored.history) == len(session.history)
 
 
 def test_event_pool_notifies_matching_waiters() -> None:
@@ -32,4 +34,26 @@ def test_event_pool_notifies_matching_waiters() -> None:
     seen: list[str] = []
     pool.wait("hot", "session", lambda notification: seen.append(notification.event_name))
     assert pool.report("hot", {"temperature": 41}) == ("session",)
+    assert seen == ["hot"]
+
+
+def test_isolated_event_runner_and_supervisor(tmp_path: Path) -> None:
+    event_root = tmp_path / "events"
+    event_root.mkdir()
+    environment = tmp_path / "event-env"
+    environment.mkdir()
+    (environment / "pyproject.toml").write_text(
+        '[project]\nname = "test-event-env"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n', encoding="utf-8"
+    )
+    (event_root / "sample.py").write_text(
+        "import json, os\nD={'name':'hot','description':'hot','field':'temperature','operator':'>=','expected':40}\n"
+        "import sys\nprint(json.dumps([D] if '-l' in sys.argv else {'temperature': 42}))\n", encoding="utf-8"
+    )
+    runner = EventScriptRunner(str(environment))
+    events = load_event_scripts_isolated(str(event_root), runner)
+    pool = EventPool()
+    pool.register(events[0])
+    seen: list[str] = []
+    pool.wait("hot", "s1", lambda notification: seen.append(notification.event_name))
+    assert EventSupervisor(pool, str(event_root), runner).poll_once() == {"hot": ("s1",)}
     assert seen == ["hot"]
