@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 from pathlib import Path
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 
 class CredentialError(RuntimeError):
@@ -21,6 +24,7 @@ class CredentialStore:
 
     def read(self) -> dict[str, str]:
         if not self.path.is_file():
+            LOGGER.debug("Credentials file is not present path=%s", self.path)
             return {}
         try:
             value: Any = json.loads(self.path.read_text(encoding="utf-8"))
@@ -28,7 +32,9 @@ class CredentialStore:
             raise CredentialError(f"Cannot read credentials file {self.path}") from exc
         if not isinstance(value, dict):
             raise CredentialError("Credentials file must contain a JSON object")
-        return {str(key): str(item) for key, item in value.items() if item is not None}
+        result = {str(key): str(item) for key, item in value.items() if item is not None}
+        LOGGER.debug("Credentials loaded path=%s keys=%s", self.path, sorted(result))
+        return result
 
     def save(self, credentials: dict[str, str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,6 +44,7 @@ class CredentialStore:
             os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
             os.replace(temporary, self.path)
             os.chmod(self.path, stat.S_IRUSR | stat.S_IWUSR)
+            LOGGER.info("Credentials saved path=%s keys=%s", self.path, sorted(credentials))
         except OSError as exc:
             try:
                 temporary.unlink(missing_ok=True)

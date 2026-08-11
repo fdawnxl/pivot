@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import operator
 import importlib.util
 import json
 import logging
+import operator
 import subprocess
 import threading
 from collections import OrderedDict
@@ -32,17 +32,24 @@ class EventScriptRunner:
 
     def _run(self, script: str, arguments: list[str]) -> object:
         command = [self.uv_binary, "run", "--project", self.environment, "python", script, *arguments]
+        LOGGER.info("Event process started script=%s operation=%s", script, arguments[0])
+        LOGGER.debug("Event process command=%s timeout=%g", command, self.timeout)
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
+            LOGGER.error("Event process execution failed script=%s error_type=%s", script, type(exc).__name__)
             raise EventError(f"Event script execution failed: {type(exc).__name__}") from exc
         if result.returncode != 0:
             detail = result.stderr.strip()[-500:] or "no error detail"
+            LOGGER.error("Event process failed script=%s return_code=%d stderr=%s", script, result.returncode, detail)
             raise EventError(f"Event script failed with code {result.returncode}: {detail}")
         try:
-            return json.loads(result.stdout)
+            value = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
+            LOGGER.error("Event process returned invalid JSON script=%s", script)
             raise EventError(f"Event script returned invalid JSON: {exc.msg}") from exc
+        LOGGER.info("Event process completed script=%s operation=%s", script, arguments[0])
+        return value
 
     def list_events(self, script: str) -> tuple[EventDescriptor, ...]:
         value = self._run(script, ["-l"])
@@ -98,6 +105,7 @@ class EventPool:
                 raise EventError(f"Event already registered: {event.name}")
             self._events[event.name] = event
             self._waiters[event.name] = OrderedDict()
+        LOGGER.info("Event registered name=%s source=%s", event.name, event.source or "built-in")
 
     def descriptors(self) -> tuple[EventDescriptor, ...]:
         with self._lock:
@@ -108,10 +116,13 @@ class EventPool:
             if event_name not in self._events:
                 raise EventError(f"Unknown event: {event_name}")
             self._waiters[event_name][session_id] = callback
+        LOGGER.info("Event waiter registered event=%s session_id=%s", event_name, session_id)
 
     def cancel(self, event_name: str, session_id: str) -> bool:
         with self._lock:
-            return self._waiters.get(event_name, {}).pop(session_id, None) is not None
+            cancelled = self._waiters.get(event_name, {}).pop(session_id, None) is not None
+        LOGGER.info("Event waiter cancellation event=%s session_id=%s cancelled=%s", event_name, session_id, cancelled)
+        return cancelled
 
     def report(self, event_name: str, payload: Mapping[str, Any]) -> tuple[str, ...]:
         """Evaluate one report and synchronously notify matching waiters in FIFO order."""
@@ -127,6 +138,7 @@ class EventPool:
             except (TypeError, ValueError) as exc:
                 raise EventError(f"Cannot evaluate event {event_name}: {exc}") from exc
             if not matched:
+                LOGGER.debug("Event condition did not match name=%s field=%s", event_name, event.field)
                 return ()
             waiters = tuple(self._waiters[event_name].items())
             self._waiters[event_name].clear()
@@ -138,7 +150,9 @@ class EventPool:
                 notified.append(session_id)
             except Exception:
                 # A failed waiter is isolated; callers can infer it from the result.
+                LOGGER.exception("Event waiter callback failed event=%s session_id=%s", event_name, session_id)
                 continue
+        LOGGER.info("Event matched name=%s notified=%d", event_name, len(notified))
         return tuple(notified)
 
 
@@ -182,6 +196,7 @@ def load_event_scripts_isolated(root: str, runner: EventScriptRunner) -> tuple[E
             result.extend(runner.list_events(str(script)))
         except EventError as exc:
             LOGGER.warning("Unable to load isolated event script %s: %s", script, exc)
+    LOGGER.info("Workspace event discovery completed loaded=%d root=%s", len(result), root)
     return tuple(result)
 
 
@@ -194,6 +209,7 @@ class EventSupervisor:
         self.runner = runner
 
     def poll_once(self) -> dict[str, tuple[str, ...]]:
+        LOGGER.info("Event supervisor poll started root=%s", self.root)
         results: dict[str, tuple[str, ...]] = {}
         from pathlib import Path
 
@@ -211,4 +227,5 @@ class EventSupervisor:
                         LOGGER.warning("Unable to report event %s: %s", event.name, exc)
                         continue
                     results[event.name] = notified
+        LOGGER.info("Event supervisor poll completed evaluated=%d", len(results))
         return results

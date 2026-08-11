@@ -34,16 +34,22 @@ class MeasureRunner:
         if not script_path.is_file():
             raise CapabilityError(f"Measure script does not exist: {script_path}")
         command = [self.uv_binary, "run", "--project", str(self.environment), "python", str(script_path), *arguments]
+        LOGGER.info("Measure process started script=%s operation=%s", script_path.name, arguments[0])
+        LOGGER.debug("Measure process command=%s timeout=%g", command, self.timeout)
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout, check=False)
         except subprocess.TimeoutExpired as exc:
+            LOGGER.error("Measure process timed out script=%s timeout=%g", script_path.name, self.timeout)
             raise CapabilityError(f"Measure capability timed out after {self.timeout:g} seconds") from exc
         except OSError as exc:
+            LOGGER.error("Measure process could not start script=%s error_type=%s", script_path.name, type(exc).__name__)
             raise CapabilityError(f"Unable to start measure capability: {exc}") from exc
         if result.returncode != 0:
             detail = result.stderr.strip()[-500:] or "no error detail"
+            LOGGER.error("Measure process failed script=%s return_code=%d stderr=%s", script_path.name, result.returncode, detail)
             raise CapabilityError(f"Measure capability failed with code {result.returncode}: {detail}")
         output = result.stdout.strip()
+        LOGGER.info("Measure process completed script=%s", script_path.name)
         try:
             return json.loads(output)
         except json.JSONDecodeError:
@@ -75,6 +81,7 @@ class CapabilityRegistry:
         self._descriptors[descriptor.name] = descriptor
         if handler is not None:
             self._handlers[descriptor.name] = handler
+        LOGGER.debug("Capability registered name=%s kind=%s source=%s", descriptor.name, descriptor.kind, descriptor.source or "built-in")
 
     def descriptors(self, kind: CapabilityKind | None = None) -> tuple[CapabilityDescriptor, ...]:
         items = self._descriptors.values()
@@ -105,8 +112,12 @@ class CapabilityRegistry:
             raise CapabilityError(f"Invalid arguments for capability {call.name}: {exc}") from exc
         LOGGER.info("Executing %s capability '%s'", descriptor.kind, descriptor.name)
         try:
-            return handler(**call.arguments)
+            result = handler(**call.arguments)
         except CapabilityError:
+            LOGGER.warning("Capability failed name=%s kind=%s", descriptor.name, descriptor.kind)
             raise
         except Exception as exc:
+            LOGGER.error("Capability raised name=%s kind=%s error_type=%s", descriptor.name, descriptor.kind, type(exc).__name__)
             raise CapabilityError(f"Capability {call.name} failed: {type(exc).__name__}: {exc}") from exc
+        LOGGER.info("Capability completed name=%s kind=%s", descriptor.name, descriptor.kind)
+        return result

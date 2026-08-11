@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from ..models import Message
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -41,7 +44,7 @@ class LiteLLMClient:
             try:
                 from litellm import completion as litellm_completion
             except ImportError as exc:
-                raise LLMError("LiteLLM is not installed; run 'uv sync --extra llm'") from exc
+                raise LLMError("LiteLLM is not installed; run 'uv sync'") from exc
             completion = litellm_completion
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -54,9 +57,17 @@ class LiteLLMClient:
             kwargs["api_key"] = self.api_key
         if tools:
             kwargs["tools"] = list(tools)
+        LOGGER.info("LLM request started model=%s messages=%d tools=%d", self.model, len(messages), len(tools))
+        LOGGER.debug(
+            "LLM request routing api_base_configured=%s timeout=%g roles=%s",
+            self.api_base is not None,
+            self.timeout,
+            [message.role for message in messages],
+        )
         try:
-            return completion(**kwargs)
+            response = completion(**kwargs)
         except Exception as exc:
-            # Provider SDKs expose many exception classes. Keep the public surface
-            # stable and do not include request content or credentials.
-            raise LLMError(f"LLM request failed: {type(exc).__name__}: {exc}") from exc
+            LOGGER.error("LLM request failed model=%s error_type=%s", self.model, type(exc).__name__)
+            raise LLMError(f"LLM request failed: {type(exc).__name__}") from exc
+        LOGGER.info("LLM request completed model=%s", self.model)
+        return response

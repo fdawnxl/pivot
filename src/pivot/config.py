@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .logging import configure_logging
 from .credentials import CredentialStore
+from .logging import configure_logging
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ConfigurationError(ValueError):
     """Raised when configuration is missing or invalid."""
+
+
+def _validate_log_level(value: str, *, setting: str) -> str:
+    normalized = value.upper()
+    if normalized not in {"DEBUG", "INFO", "WARN", "WARNING", "ERROR"}:
+        raise ConfigurationError(f"Invalid {setting} value: {value!r}")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +35,8 @@ class PivotConfig:
     provider: str | None = None
     max_rounds: int = 8
     llm_timeout: float = 120.0
-    log_level: str = "INFO"
+    log_console_level: str = "INFO"
+    log_file_level: str = "DEBUG"
 
     @classmethod
     def load(cls, *, workspace_path: str | Path | None = None, config_path: str | Path | None = None) -> "PivotConfig":
@@ -46,8 +57,9 @@ class PivotConfig:
                 raise ConfigurationError(f"Cannot load configuration {toml_file}: {exc}") from exc
 
         llm_values = values.get("llm", {}) if isinstance(values.get("llm", {}), dict) else {}
+        logging_values = values.get("logging", {}) if isinstance(values.get("logging", {}), dict) else {}
         # Support both the initial flat schema and the clearer [llm] schema.
-        merged: dict[str, Any] = {**values, **llm_values}
+        merged: dict[str, Any] = {**values, **llm_values, **logging_values}
         credentials = CredentialStore(workspace / "credentials.json")
         stored_credentials = credentials.read()
 
@@ -61,6 +73,13 @@ class PivotConfig:
             except (TypeError, ValueError) as exc:
                 raise ConfigurationError(f"Invalid {env_name} value: {value!r}") from exc
 
+        legacy_log_level = get("log_level", None)
+        console_level = os.getenv("PIVOT_LOG_DISPLAY_LEVEL") or get(
+            "log_console_level", merged.get("display_level", legacy_log_level or "INFO")
+        )
+        file_level = os.getenv("PIVOT_LOG_STORAGE_LEVEL") or get(
+            "log_file_level", merged.get("storage_level", legacy_log_level or "DEBUG")
+        )
         config = cls(
             workspace_path=workspace,
             model=get("model", "gpt-4o-mini"),
@@ -69,18 +88,41 @@ class PivotConfig:
             provider=get("provider", None),
             max_rounds=get("max_rounds", 8, int),
             llm_timeout=get("llm_timeout", 120.0, float),
-            log_level=get("log_level", "INFO"),
+            log_console_level=_validate_log_level(console_level, setting="display log level"),
+            log_file_level=_validate_log_level(file_level, setting="storage log level"),
         )
         if config.max_rounds < 1 or config.llm_timeout <= 0:
             raise ConfigurationError("max_rounds must be positive and llm_timeout must be greater than zero")
         config.ensure_workspace()
-        configure_logging(config.log_level)
+        configure_logging(
+            config.log_console_level,
+            file_level=config.log_file_level,
+            log_path=config.workspace_path / "logs" / "pivot.log",
+        )
+        LOGGER.info("Workspace initialized path=%s", config.workspace_path)
+        LOGGER.debug(
+            "Configuration loaded model=%s provider=%s api_base_configured=%s max_rounds=%d llm_timeout=%g",
+            config.model,
+            config.provider or "auto",
+            config.api_base is not None,
+            config.max_rounds,
+            config.llm_timeout,
+        )
         return config
 
     def ensure_workspace(self) -> None:
         """Create the documented workspace directories without overwriting user files."""
 
-        for relative in ("capabilities/think", "capabilities/measure", "capabilities/work", "events", "memory", "logs", "measure-env", "event-env"):
+        for relative in (
+            "capabilities/think",
+            "capabilities/measure",
+            "capabilities/work",
+            "events",
+            "memory",
+            "logs",
+            "measure-env",
+            "event-env",
+        ):
             (self.workspace_path / relative).mkdir(parents=True, exist_ok=True)
         measure_project = self.workspace_path / "measure-env" / "pyproject.toml"
         if not measure_project.exists():

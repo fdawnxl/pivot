@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from .models import ParsedResponse, ToolCall
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ResponseParseError(ValueError):
@@ -66,4 +69,5 @@ def parse_response(response: Any) -> ParsedResponse:
                 call_id=_value(raw_call, "id"),
             )
         )
+    LOGGER.debug("LLM response parsed text_length=%d tool_calls=%d", len(text), len(parsed_calls))
     return ParsedResponse(text=text, tool_calls=tuple(parsed_calls), raw=response)

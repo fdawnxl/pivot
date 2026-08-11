@@ -65,6 +65,7 @@ def register_workspace_capabilities(workspace: str | Path, registry: CapabilityR
     """Load valid think/work metadata and measure script adapters independently."""
 
     root = Path(workspace).expanduser()
+    loaded = 0
     for kind in ("think", "work", "measure"):
         directory = root / "capabilities" / kind
         for script in sorted(directory.glob("*.py")):
@@ -81,5 +82,7 @@ def register_workspace_capabilities(workspace: str | Path, registry: CapabilityR
                 else:
                     runner = MeasureRunner(measure_environment)
                     registry.register(descriptor, lambda feature, _script=script, _runner=runner: _runner.read(_script, feature))
+                loaded += 1
             except Exception as exc:
                 LOGGER.warning("Unable to register %s capability %s: %s", kind, script, exc)
+    LOGGER.info("Workspace capability discovery completed loaded=%d root=%s", loaded, root / "capabilities")
