@@ -49,5 +49,5 @@ def test_workspace_capability_discovery_loads_all_kinds(tmp_path: Path) -> None:
         "DESCRIPTOR = {'name': 'm', 'description': 'm', 'parameters': {}}\n", encoding="utf-8"
     )
     registry = CapabilityRegistry()
-    register_workspace_capabilities(workspace, registry, workspace / "measure-env")
+    register_workspace_capabilities(workspace, registry, workspace / "environment" / "measure")
     assert {item.kind for item in registry.descriptors()} == {"think", "measure", "work"}

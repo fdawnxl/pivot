@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import uuid4
 
 from pivot.capabilities import CapabilityRegistry
 from pivot.events import EventPool, EventScriptRunner, EventSupervisor, load_event_scripts_isolated
@@ -21,10 +22,11 @@ class FakeLLM:
 def test_session_executes_tools_and_persists(tmp_path: Path) -> None:
     registry = CapabilityRegistry()
     registry.register(CapabilityDescriptor("echo", "work", "Echo value", {"type": "object"}), lambda value: value)
-    session = ConversationSession("s1", llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
+    session_id = str(uuid4())
+    session = ConversationSession(session_id, llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
     assert session.run("hello") == "finished"
-    assert "finished" in (tmp_path / "s1.txt").read_text(encoding="utf-8")
-    restored = ConversationSession("s1", llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
+    assert "finished" in (tmp_path / session_id / "history.jsonl").read_text(encoding="utf-8")
+    restored = ConversationSession(session_id, llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
     assert len(restored.history) == len(session.history)
 
 

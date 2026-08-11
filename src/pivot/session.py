@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Sequence
 from typing import Any
+from uuid import UUID, uuid4
 
 from .capabilities import CapabilityError, CapabilityRegistry
 from .events import EventPool
@@ -19,6 +20,15 @@ LOGGER = logging.getLogger(__name__)
 
 class SessionError(RuntimeError):
     """Raised when a session cannot make progress."""
+
+
+def normalize_session_id(session_id: str) -> str:
+    """Validate and canonicalize a session UUID."""
+
+    try:
+        return str(UUID(session_id))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("session_id must be a valid UUID") from exc
 
 
 class ConversationSession:
@@ -36,7 +46,7 @@ class ConversationSession:
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
-        self.session_id = session_id
+        self.session_id = normalize_session_id(session_id)
         self.llm = llm
         self.capabilities = capabilities
         self.memory = memory
@@ -64,6 +74,8 @@ class ConversationSession:
                     calls.append(ToolCall(function["name"], arguments, raw_call.get("id")))
                 restored.append(Message(value["role"], value.get("content"), value.get("name"), tuple(calls), value.get("tool_call_id")))
             self.history = restored
+            if restored:
+                LOGGER.info("Session memory restored session_id=%s messages=%d", self.session_id, len(restored))
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             LOGGER.warning("Unable to restore session %s memory; starting a new context: %s", self.session_id, exc)
             self.history = []
@@ -92,7 +104,9 @@ class ConversationSession:
             self.history.append(self._context_message())
         self.history.append(Message(role="user", content=user_input))
         self._persist()
+        LOGGER.info("Session turn started session_id=%s input_length=%d", self.session_id, len(user_input))
         for round_number in range(1, self.max_rounds + 1):
+            LOGGER.debug("Session LLM round started session_id=%s round=%d", self.session_id, round_number)
             try:
                 raw = self.llm.complete(self.history, tools=self.capabilities.llm_tools())
                 response = parse_response(raw)
@@ -101,17 +115,27 @@ class ConversationSession:
                 LOGGER.exception("Session %s failed in LLM round %d", self.session_id, round_number)
                 raise SessionError(f"LLM round {round_number} failed: {type(exc).__name__}: {exc}") from exc
             self.history.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls))
+            LOGGER.debug(
+                "Session LLM round completed session_id=%s round=%d tool_calls=%d text_length=%d",
+                self.session_id,
+                round_number,
+                len(response.tool_calls),
+                len(response.text),
+            )
             if not response.tool_calls:
                 self._persist()
+                LOGGER.info("Session turn completed session_id=%s rounds=%d", self.session_id, round_number)
                 return response.text
             for call in response.tool_calls:
                 try:
                     result = self.capabilities.execute(call)
                     encoded = json.dumps(result, ensure_ascii=False, default=str)
                 except CapabilityError as exc:
+                    LOGGER.warning("Session capability call failed session_id=%s capability=%s", self.session_id, call.name)
                     encoded = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 self.history.append(Message(role="tool", content=encoded, name=call.name, tool_call_id=call.call_id))
             self._persist()
+        LOGGER.error("Session exceeded maximum rounds session_id=%s max_rounds=%d", self.session_id, self.max_rounds)
         raise SessionError(f"Session exceeded maximum LLM rounds ({self.max_rounds})")
 
 
@@ -122,10 +146,20 @@ class SessionManager:
         self._dependencies = session_dependencies
         self._sessions: dict[str, ConversationSession] = {}
 
+    def create(self) -> ConversationSession:
+        """Create a session with a unique UUID4 identifier."""
+
+        while True:
+            session_id = str(uuid4())
+            if session_id not in self._sessions:
+                return self.get(session_id)
+
     def get(self, session_id: str) -> ConversationSession:
-        if session_id not in self._sessions:
-            self._sessions[session_id] = ConversationSession(session_id, **self._dependencies)
-        return self._sessions[session_id]
+        canonical = normalize_session_id(session_id)
+        if canonical not in self._sessions:
+            self._sessions[canonical] = ConversationSession(canonical, **self._dependencies)
+            LOGGER.info("Session created session_id=%s", canonical)
+        return self._sessions[canonical]
 
     def run(self, session_id: str, user_input: str) -> str:
         return self.get(session_id).run(user_input)

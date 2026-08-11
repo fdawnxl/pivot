@@ -120,17 +120,17 @@ class PivotConfig:
             "events",
             "memory",
             "logs",
-            "measure-env",
-            "event-env",
+            "environment/measure",
+            "environment/event",
         ):
             (self.workspace_path / relative).mkdir(parents=True, exist_ok=True)
-        measure_project = self.workspace_path / "measure-env" / "pyproject.toml"
+        measure_project = self.workspace_path / "environment" / "measure" / "pyproject.toml"
         if not measure_project.exists():
             measure_project.write_text(
                 '[project]\nname = "pivot-measure-environment"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n',
                 encoding="utf-8",
             )
-        event_project = self.workspace_path / "event-env" / "pyproject.toml"
+        event_project = self.workspace_path / "environment" / "event" / "pyproject.toml"
         if not event_project.exists():
             event_project.write_text(
                 '[project]\nname = "pivot-event-environment"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n',

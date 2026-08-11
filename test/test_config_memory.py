@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -15,6 +16,9 @@ def test_workspace_bootstrap_and_environment_precedence(tmp_path: Path, monkeypa
     assert config.model == "env-model"
     assert config.max_rounds == 3
     assert (workspace / "capabilities/measure").is_dir()
+    assert (workspace / "environment/measure/pyproject.toml").is_file()
+    assert (workspace / "environment/event/pyproject.toml").is_file()
+    assert (workspace / "logs/pivot.log").is_file()
 
 
 def test_workspace_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -32,12 +36,15 @@ def test_codex_files_are_not_runtime_inputs(tmp_path: Path, monkeypatch: pytest.
     assert config.model == "gpt-4o-mini"
 
 
-def test_memory_uses_safe_session_names(tmp_path: Path) -> None:
+def test_memory_uses_uuid_session_directories(tmp_path: Path) -> None:
     memory = TextMemory(tmp_path)
-    memory.append("robot/one", "first")
-    memory.append("robot/one", "second")
-    assert memory.read("robot/one") == "first\nsecond"
-    assert len(list(tmp_path.glob("*.txt"))) == 1
+    session_id = str(uuid4())
+    memory.append(session_id, "first")
+    memory.append(session_id, "second")
+    assert memory.read(session_id) == "first\nsecond"
+    assert (tmp_path / session_id / "history.jsonl").is_file()
+    with pytest.raises(ValueError):
+        memory.read("robot/one")
 
 
 def test_workspace_credentials_are_restricted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
