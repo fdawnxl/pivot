@@ -35,6 +35,10 @@ class PivotConfig:
     capability_timeout: float = 15.0
     event_poll_interval: float = 1.0
     event_max_wait: float = 3600.0
+    dependency_install_timeout: float = 300.0
+    dependency_start_timeout: float = 15.0
+    dependency_dbus_timeout: float = 1.0
+    dependency_stop_timeout: float = 5.0
     log_console_level: str = "INFO"
     log_file_level: str = "DEBUG"
 
@@ -92,6 +96,10 @@ class PivotConfig:
             capability_timeout=get("capability_timeout", 15.0, float),
             event_poll_interval=get("event_poll_interval", 1.0, float),
             event_max_wait=get("event_max_wait", 3600.0, float),
+            dependency_install_timeout=get("dependency_install_timeout", 300.0, float),
+            dependency_start_timeout=get("dependency_start_timeout", 15.0, float),
+            dependency_dbus_timeout=get("dependency_dbus_timeout", 1.0, float),
+            dependency_stop_timeout=get("dependency_stop_timeout", 5.0, float),
             log_console_level=_validate_log_level(console_level, setting="display log level"),
             log_file_level=_validate_log_level(file_level, setting="storage log level"),
         )
@@ -101,6 +109,10 @@ class PivotConfig:
             or config.capability_timeout <= 0
             or config.event_poll_interval <= 0
             or config.event_max_wait <= 0
+            or config.dependency_install_timeout <= 0
+            or config.dependency_start_timeout <= 0
+            or config.dependency_dbus_timeout <= 0
+            or config.dependency_stop_timeout <= 0
         ):
             raise ConfigurationError("max_rounds and timeouts must be greater than zero")
         config.ensure_workspace()
@@ -134,6 +146,7 @@ def _ensure_workspace(workspace_path: Path) -> None:
             "capabilities/measure",
             "capabilities/work",
             "events",
+            "dependencies",
             "memory",
             "logs",
             "environment/measure",

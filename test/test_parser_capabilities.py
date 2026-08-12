@@ -73,3 +73,24 @@ def test_registry_rejects_non_json_work_results() -> None:
     registry.register(CapabilityDescriptor("bad", "work", "bad"), lambda: object())
     with pytest.raises(CapabilityError, match="non-JSON"):
         registry.execute(ToolCall("bad"))
+
+
+def test_capability_runner_preserves_dbus_addresses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pivot.capabilities.registry import CapabilityScriptRunner
+
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    (environment / "pyproject.toml").write_text(
+        '[project]\nname="dbus-capability"\nversion="0.1.0"\nrequires-python=">=3.11"\ndependencies=[]\n',
+        encoding="utf-8",
+    )
+    script = tmp_path / "read_env.py"
+    script.write_text(
+        "import json,os\nprint(json.dumps(os.environ.get('DBUS_SESSION_BUS_ADDRESS')))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/pivot-test-bus")
+
+    assert CapabilityScriptRunner(environment, workspace=tmp_path)._run(script, ["-l"]) == (
+        "unix:path=/tmp/pivot-test-bus"
+    )

@@ -42,6 +42,7 @@ def _show_banner(runtime: Runtime, session: ConversationSession, stream: TextIO)
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging("INFO")
+    client: PivotClient | None = None
     try:
         client = PivotClient(build_runtime(PivotConfig.load(workspace_path=args.workspace)))
         runtime = client.runtime
@@ -62,3 +63,6 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         LOGGER.error("Pivot failed: %s", exc)
         return 1
+    finally:
+        if client is not None:
+            client.close()

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from .capabilities import CapabilityRegistry
 from .capabilities.discovery import register_workspace_capabilities
 from .config import PivotConfig
+from .dependencies import DependencyManager
 from .events import EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
 from .llm import LiteLLMClient
 from .memory import TextMemory
@@ -25,51 +26,75 @@ class Runtime:
     events: EventPool
     event_service: EventService
     sessions: SessionManager
+    dependencies: DependencyManager | None = None
+
+    def close(self) -> None:
+        """Release runtime-owned external processes."""
+
+        if self.dependencies is not None:
+            self.dependencies.close()
 
 
 def build_runtime(config: PivotConfig) -> Runtime:
     """Build capability, event, LLM, memory, and session services."""
 
-    registry = CapabilityRegistry()
-    environment_root = config.workspace_path / "environment"
-    register_workspace_capabilities(
+    dependencies = DependencyManager(
         config.workspace_path,
-        registry,
-        environment_root,
-        timeout=config.capability_timeout,
+        install_timeout=config.dependency_install_timeout,
+        start_timeout=config.dependency_start_timeout,
+        dbus_timeout=config.dependency_dbus_timeout,
+        stop_timeout=config.dependency_stop_timeout,
     )
-    event_pool = EventPool()
-    event_runner = EventScriptRunner(
-        environment_root / "event",
-        workspace=config.workspace_path,
-        timeout=config.capability_timeout,
-    )
-    for event in load_event_scripts_isolated(str(config.workspace_path / "events"), event_runner):
-        try:
-            event_pool.register(event)
-        except Exception as exc:
-            LOGGER.warning("Unable to register workspace event %s: %s", event.name, exc)
-    event_service = EventService(
-        event_pool,
-        EventSupervisor(event_pool, event_runner),
-        poll_interval=config.event_poll_interval,
-        max_wait=config.event_max_wait,
-    )
-    manager = SessionManager(
-        llm=LiteLLMClient(
-            config.provider.model,
-            api_base=config.provider.api_base,
-            api_key=config.provider.api_key,
-            timeout=config.llm_timeout,
-        ),
-        capabilities=registry,
-        memory=TextMemory(config.workspace_path / "memory"),
-        events=event_pool,
-        event_service=event_service,
-        max_rounds=config.max_rounds,
-    )
-    LOGGER.info("Runtime assembly completed capabilities=%d events=%d", len(registry.descriptors()), len(event_pool.descriptors()))
-    return Runtime(config, registry, event_pool, event_service, manager)
+    try:
+        dependencies.start_all()
+        registry = CapabilityRegistry()
+        environment_root = config.workspace_path / "environment"
+        register_workspace_capabilities(
+            config.workspace_path,
+            registry,
+            environment_root,
+            timeout=config.capability_timeout,
+        )
+        event_pool = EventPool()
+        event_runner = EventScriptRunner(
+            environment_root / "event",
+            workspace=config.workspace_path,
+            timeout=config.capability_timeout,
+        )
+        for event in load_event_scripts_isolated(str(config.workspace_path / "events"), event_runner):
+            try:
+                event_pool.register(event)
+            except Exception as exc:
+                LOGGER.warning("Unable to register workspace event %s: %s", event.name, exc)
+        event_service = EventService(
+            event_pool,
+            EventSupervisor(event_pool, event_runner),
+            poll_interval=config.event_poll_interval,
+            max_wait=config.event_max_wait,
+        )
+        manager = SessionManager(
+            llm=LiteLLMClient(
+                config.provider.model,
+                api_base=config.provider.api_base,
+                api_key=config.provider.api_key,
+                timeout=config.llm_timeout,
+            ),
+            capabilities=registry,
+            memory=TextMemory(config.workspace_path / "memory"),
+            events=event_pool,
+            event_service=event_service,
+            max_rounds=config.max_rounds,
+        )
+        LOGGER.info(
+            "Runtime assembly completed dependencies=%d capabilities=%d events=%d",
+            len(dependencies.descriptors()),
+            len(registry.descriptors()),
+            len(event_pool.descriptors()),
+        )
+        return Runtime(config, registry, event_pool, event_service, manager, dependencies)
+    except BaseException:
+        dependencies.close()
+        raise
 
 
 class PivotClient:
@@ -110,6 +135,17 @@ class PivotClient:
         """List sessions currently managed by this client."""
 
         return self.runtime.sessions.sessions()
+
+    def close(self) -> None:
+        """Release dependency processes owned by this client runtime."""
+
+        self.runtime.close()
+
+    def __enter__(self) -> "PivotClient":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 __all__ = ["PivotClient", "Runtime", "build_runtime"]

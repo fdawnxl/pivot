@@ -63,7 +63,19 @@ class EventScriptRunner:
         environment = {
             key: value
             for key, value in os.environ.items()
-            if key in {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "UV_CACHE_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+            if key
+            in {
+                "PATH",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "TMPDIR",
+                "UV_CACHE_DIR",
+                "SSL_CERT_FILE",
+                "SSL_CERT_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "DBUS_SYSTEM_BUS_ADDRESS",
+            }
         }
         environment["PIVOT_WORKSPACE_PATH"] = str(self.workspace)
         try:

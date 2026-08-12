@@ -41,6 +41,7 @@ An empty workspace is initialized as follows. Existing files are never overwritt
 ```text
 workspace/
 ├── capabilities/{think,measure,work}/
+├── dependencies/<dependency-project>/
 ├── environment/{think,measure,work,event}/
 ├── events/
 ├── logs/pivot.log
@@ -48,6 +49,8 @@ workspace/
 ├── config.toml
 └── credentials.toml        # named LLM providers, mode 0600
 ```
+
+Long-running external programs live in `dependencies`, with one standalone uv project per first-level directory. A valid project declares a meaningful D-Bus id and argv-style start command in `dependency.toml`. Pivot synchronizes its packages only on the first successful start, launches it in its own uv environment, confirms readiness through the common D-Bus status and heartbeat interface, and stops the process when the runtime closes. See [the dependency protocol](doc/dependencies.md) for the manifest and service contract.
 
 LiteLLM is a core dependency and is installed by `uv sync`:
 
@@ -89,7 +92,7 @@ The corresponding environment variables are `PIVOT_LOG_DISPLAY_LEVEL` and `PIVOT
 
 ## Architecture
 
-`pivot.config` bootstraps a workspace; `pivot.logging` configures terminal and rotating-file output; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts text and tool calls; `pivot.capabilities` validates and dispatches `think`, `measure` and `work` capabilities; `pivot.events` owns event definitions and FIFO waiters; `pivot.memory` writes UUID-isolated transcripts atomically; `pivot.session` runs the bounded conversation loop; and `pivot.orchestrator` runs independent agents concurrently.
+`pivot.config` bootstraps a workspace; `pivot.logging` configures terminal and rotating-file output; `pivot.dependencies` installs, starts, checks, and stops external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts text and tool calls; `pivot.capabilities` validates and dispatches `think`, `measure` and `work` capabilities; `pivot.events` owns event definitions and FIFO waiters; `pivot.memory` writes UUID-isolated transcripts atomically; `pivot.session` runs the bounded conversation loop; and `pivot.orchestrator` runs independent agents concurrently.
 
 Workspace capability scripts are never imported by the pivot process. They use dedicated uv environments and JSON command protocols:
 

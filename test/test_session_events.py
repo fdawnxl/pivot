@@ -179,6 +179,25 @@ def test_event_runner_rejects_missing_source(tmp_path: Path) -> None:
         raise AssertionError("missing event source was accepted")
 
 
+def test_event_runner_preserves_dbus_addresses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    environment = tmp_path / "event-env"
+    environment.mkdir()
+    (environment / "pyproject.toml").write_text(
+        '[project]\nname="dbus-event"\nversion="0.1.0"\nrequires-python=">=3.11"\ndependencies=[]\n',
+        encoding="utf-8",
+    )
+    script = tmp_path / "event.py"
+    script.write_text(
+        "import json,os\nprint(json.dumps({'address':os.environ.get('DBUS_SESSION_BUS_ADDRESS')}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/pivot-test-bus")
+
+    assert EventScriptRunner(environment, workspace=tmp_path).poll(script) == {
+        "address": "unix:path=/tmp/pivot-test-bus"
+    }
+
+
 class ImmediateSupervisor:
     def __init__(self, pool: EventPool) -> None:
         self.pool = pool

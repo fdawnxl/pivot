@@ -29,6 +29,7 @@ def test_workspace_bootstrap_and_environment_precedence(tmp_path: Path, monkeypa
     assert (workspace / "environment/think/pyproject.toml").is_file()
     assert (workspace / "environment/work/pyproject.toml").is_file()
     assert (workspace / "environment/event/pyproject.toml").is_file()
+    assert (workspace / "dependencies").is_dir()
     assert (workspace / "logs/pivot.log").is_file()
 
 
