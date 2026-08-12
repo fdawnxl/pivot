@@ -101,6 +101,16 @@ def test_isolated_event_runner_discovers_generic_source(tmp_path: Path) -> None:
     assert events[0].operators == (">", "<")
 
 
+def test_event_runner_rejects_missing_source(tmp_path: Path) -> None:
+    runner = EventScriptRunner(tmp_path / "environment", workspace=tmp_path)
+    try:
+        runner.poll(tmp_path / "missing.py")
+    except EventError as exc:
+        assert "does not exist" in str(exc)
+    else:
+        raise AssertionError("missing event source was accepted")
+
+
 class ImmediateSupervisor:
     def __init__(self, pool: EventPool) -> None:
         self.pool = pool

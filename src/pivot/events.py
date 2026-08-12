@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import operator
+import os
 import subprocess
 import threading
 import time
@@ -36,19 +37,45 @@ class EventError(RuntimeError):
 class EventScriptRunner:
     """Execute event source scripts through their dedicated uv project."""
 
-    def __init__(self, environment: str | Path, *, timeout: float = 15.0, uv_binary: str = "uv") -> None:
+    def __init__(
+        self,
+        environment: str | Path,
+        *,
+        workspace: str | Path | None = None,
+        timeout: float = 15.0,
+        uv_binary: str = "uv",
+        max_output_bytes: int = 1024 * 1024,
+    ) -> None:
         self.environment = Path(environment).expanduser().resolve()
+        self.workspace = Path(workspace).expanduser().resolve() if workspace else self.environment.parent.parent
         self.timeout = timeout
         self.uv_binary = uv_binary
-        if timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
+        self.max_output_bytes = max_output_bytes
+        if timeout <= 0 or max_output_bytes < 1:
+            raise ValueError("timeout and max_output_bytes must be positive")
 
     def _run(self, script: str | Path, arguments: list[str]) -> object:
         script_path = Path(script).expanduser().resolve()
+        if not script_path.is_file():
+            raise EventError(f"Event source does not exist: {script_path}")
         command = [self.uv_binary, "run", "--project", str(self.environment), "python", str(script_path), *arguments]
         LOGGER.info("Event process started script=%s operation=%s", script_path.name, arguments[0])
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key in {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "UV_CACHE_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+        }
+        environment["PIVOT_WORKSPACE_PATH"] = str(self.workspace)
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout, check=False)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+                cwd=self.workspace,
+                env=environment,
+            )
         except subprocess.TimeoutExpired as exc:
             LOGGER.error("Event process timed out script=%s timeout=%g", script_path.name, self.timeout)
             raise EventError(f"Event source timed out after {self.timeout:g} seconds") from exc
@@ -59,6 +86,8 @@ class EventScriptRunner:
             detail = result.stderr.strip()[-500:] or "no error detail"
             LOGGER.error("Event process failed script=%s return_code=%d stderr=%s", script_path.name, result.returncode, detail)
             raise EventError(f"Event source failed with code {result.returncode}: {detail}")
+        if len(result.stdout.encode("utf-8")) > self.max_output_bytes:
+            raise EventError(f"Event source output exceeds {self.max_output_bytes} bytes")
         try:
             value = json.loads(result.stdout)
         except json.JSONDecodeError as exc:

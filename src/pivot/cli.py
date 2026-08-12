@@ -53,7 +53,11 @@ def build_runtime(config: PivotConfig) -> Runtime:
         timeout=config.capability_timeout,
     )
     event_pool = EventPool()
-    event_runner = EventScriptRunner(str(environment_root / "event"))
+    event_runner = EventScriptRunner(
+        environment_root / "event",
+        workspace=config.workspace_path,
+        timeout=config.capability_timeout,
+    )
     for event in load_event_scripts_isolated(str(config.workspace_path / "events"), event_runner):
         try:
             event_pool.register(event)
