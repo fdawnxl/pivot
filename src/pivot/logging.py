@@ -18,6 +18,15 @@ _HANDLER_MARKER = "_pivot_handler"
 _LEVEL_ALIASES = {"WARN": "WARNING"}
 _LOG_CONTEXT: ContextVar[dict[str, str]] = ContextVar("pivot_log_context", default={})
 _STANDARD_RECORD_FIELDS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+_DEPENDENCY_LOGGERS = (
+    "LiteLLM",
+    "LiteLLM Proxy",
+    "LiteLLM Router",
+    "litellm",
+    "openai",
+    "httpcore",
+    "httpx",
+)
 
 
 @contextmanager
@@ -80,6 +89,16 @@ def parse_log_level(level: str, *, default: int = logging.INFO) -> int:
     return value if isinstance(value, int) else default
 
 
+def configure_dependency_logging() -> None:
+    """Route warning-level dependency logs through pivot's handlers only."""
+
+    for name in _DEPENDENCY_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.propagate = True
+        logger.setLevel(logging.WARNING)
+
+
 def configure_logging(
     console_level: str = "INFO",
     *,
@@ -117,6 +136,7 @@ def configure_logging(
         root.addHandler(file_handler)
 
     root.setLevel(min(handler.level for handler in root.handlers))
+    configure_dependency_logging()
     logging.getLogger(__name__).debug(
         "Logging configured console_level=%s file_level=%s log_path=%s",
         console_level.upper(),
@@ -125,4 +145,10 @@ def configure_logging(
     )
 
 
-__all__ = ["JsonFormatter", "configure_logging", "log_context", "parse_log_level"]
+__all__ = [
+    "JsonFormatter",
+    "configure_dependency_logging",
+    "configure_logging",
+    "log_context",
+    "parse_log_level",
+]

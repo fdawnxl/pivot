@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
+from ..logging import configure_dependency_logging
 from ..models import Message
 
 LOGGER = logging.getLogger(__name__)
@@ -41,10 +43,19 @@ class LiteLLMClient:
     def complete(self, messages: Sequence[Message], *, tools: Sequence[dict[str, Any]] = ()) -> Any:
         completion = self._completion
         if completion is None:
+            configure_dependency_logging()
+            previous_log_level = os.environ.get("LITELLM_LOG")
+            os.environ["LITELLM_LOG"] = "ERROR"
             try:
                 from litellm import completion as litellm_completion
             except ImportError as exc:
                 raise LLMError("LiteLLM is not installed; run 'uv sync'") from exc
+            finally:
+                if previous_log_level is None:
+                    os.environ.pop("LITELLM_LOG", None)
+                else:
+                    os.environ["LITELLM_LOG"] = previous_log_level
+            configure_dependency_logging()
             completion = litellm_completion
         kwargs: dict[str, Any] = {
             "model": self.model,

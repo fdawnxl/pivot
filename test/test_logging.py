@@ -9,7 +9,7 @@ import pytest
 
 from pivot.config import ConfigurationError, PivotConfig
 from pivot.credentials import CredentialStore, ProviderCredential
-from pivot.logging import configure_logging, log_context
+from pivot.logging import configure_dependency_logging, configure_logging, log_context
 
 
 def test_logging_uses_independent_console_and_file_levels(tmp_path: Path) -> None:
@@ -41,6 +41,29 @@ def test_structured_logging_includes_correlation_context(tmp_path: Path) -> None
     assert record["correlation_id"] == "request-1"
     assert record["session_id"] == "session-1"
     assert record["capability"] == "cpu_read"
+
+
+def test_dependency_logging_uses_only_pivot_handlers(tmp_path: Path) -> None:
+    console = StringIO()
+    direct_output = StringIO()
+    log_path = tmp_path / "pivot.log"
+    configure_logging("info", file_level="debug", log_path=log_path, stream=console)
+    logger = logging.getLogger("LiteLLM")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(logging.StreamHandler(direct_output))
+
+    configure_dependency_logging()
+    logger.debug("request contains a complete prompt")
+    logger.warning("provider request failed")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    assert direct_output.getvalue() == ""
+    assert "complete prompt" not in console.getvalue()
+    assert console.getvalue().count("provider request failed") == 1
+    persisted = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    dependency_logs = [item for item in persisted if item["logger"] == "LiteLLM"]
+    assert [item["message"] for item in dependency_logs] == ["provider request failed"]
 
 
 def test_logging_level_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
