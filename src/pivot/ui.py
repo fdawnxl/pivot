@@ -46,21 +46,48 @@ def safe_endpoint(endpoint: str | None) -> str:
 
 
 def render_banner(summary: RuntimeSummary) -> str:
-    """Render the logo and a compact runtime summary."""
+    """Render the logo and runtime summary inside a terminal-friendly border."""
 
     capabilities = ", ".join(f"{item.kind}:{item.name}" for item in summary.capabilities) or "none"
     events = ", ".join(item.name for item in summary.events) or "none"
-    return "\n".join(
-        (
-            ASCII_LOGO,
-            f"Provider     : {summary.provider}",
-            f"Model        : {summary.model}",
-            f"Endpoint     : {summary.endpoint}",
-            f"Conversation : {summary.session_id}",
-            f"Capabilities : {capabilities}",
-            f"Events       : {events}",
-        )
+    return render_box(
+        "\n".join(
+            (
+                ASCII_LOGO,
+                "",
+                f"Provider     : {summary.provider}",
+                f"Model        : {summary.model}",
+                f"Endpoint     : {summary.endpoint}",
+                f"Conversation : {summary.session_id}",
+                f"Capabilities : {capabilities}",
+                f"Events       : {events}",
+            )
+        ),
+        title="PIVOT",
     )
 
 
-__all__ = ["ASCII_LOGO", "RuntimeSummary", "render_banner", "safe_endpoint"]
+def render_box(content: str, *, title: str | None = None, width: int | None = None) -> str:
+    """Wrap header content in a compact terminal box."""
+
+    lines = content.splitlines() or [""]
+    inner_width = max(len(line) for line in lines)
+    if width is not None:
+        inner_width = max(inner_width, width)
+    label = f" {title} " if title else ""
+    if label:
+        inner_width = max(inner_width, len(label) + 2)
+        top = "╭─" + label + "─" * max(0, inner_width - len(label) - 2) + "╮"
+    else:
+        top = "╭" + "─" * (inner_width + 2) + "╮"
+    body = [f"│ {line.ljust(inner_width)} │" for line in lines]
+    return "\n".join([top, *body, "╰" + "─" * (inner_width + 2) + "╯"])
+
+
+__all__ = [
+    "ASCII_LOGO",
+    "RuntimeSummary",
+    "render_banner",
+    "render_box",
+    "safe_endpoint",
+]

@@ -99,6 +99,19 @@ def configure_dependency_logging() -> None:
         logger.setLevel(logging.WARNING)
 
 
+def configure_tui_logging() -> None:
+    """Disable pivot's console handler while preserving durable file logging."""
+
+    root = logging.getLogger()
+    for handler in tuple(root.handlers):
+        if getattr(handler, _HANDLER_MARKER, False) and not isinstance(handler, logging.FileHandler):
+            root.removeHandler(handler)
+            handler.close()
+    if root.handlers:
+        root.setLevel(min(handler.level for handler in root.handlers))
+    configure_dependency_logging()
+
+
 def configure_logging(
     console_level: str = "INFO",
     *,
@@ -149,6 +162,7 @@ __all__ = [
     "JsonFormatter",
     "configure_dependency_logging",
     "configure_logging",
+    "configure_tui_logging",
     "log_context",
     "parse_log_level",
 ]

@@ -9,7 +9,7 @@ import pytest
 
 from pivot.config import ConfigurationError, PivotConfig
 from pivot.credentials import CredentialStore, ProviderCredential
-from pivot.logging import configure_dependency_logging, configure_logging, log_context
+from pivot.logging import configure_dependency_logging, configure_logging, configure_tui_logging, log_context
 
 
 def test_logging_uses_independent_console_and_file_levels(tmp_path: Path) -> None:
@@ -64,6 +64,21 @@ def test_dependency_logging_uses_only_pivot_handlers(tmp_path: Path) -> None:
     persisted = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     dependency_logs = [item for item in persisted if item["logger"] == "LiteLLM"]
     assert [item["message"] for item in dependency_logs] == ["provider request failed"]
+
+
+def test_tui_logging_preserves_file_without_console_output(tmp_path: Path) -> None:
+    console = StringIO()
+    log_path = tmp_path / "pivot.log"
+    configure_logging("info", file_level="debug", log_path=log_path, stream=console)
+
+    configure_tui_logging()
+    logging.getLogger("pivot.test").info("visible only in durable log")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    assert console.getvalue() == ""
+    persisted = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert persisted[-1]["message"] == "visible only in durable log"
 
 
 def test_logging_level_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

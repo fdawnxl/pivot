@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from pivot.capabilities import CapabilityRegistry
 from pivot.events import EVENT_WAIT_TOOL, EventError, EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, EventDescriptor
-from pivot.session import ConversationSession
+from pivot.session import CancellationToken, ConversationSession, SessionCancelled
 
 
 class FakeLLM:
@@ -31,6 +33,45 @@ def test_session_executes_tools_and_persists(tmp_path: Path) -> None:
     assert "finished" in (tmp_path / session_id / "history.jsonl").read_text(encoding="utf-8")
     restored = ConversationSession(session_id, llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
     assert len(restored.history) == len(session.history)
+
+
+def test_session_emits_user_safe_progress_updates(tmp_path: Path) -> None:
+    registry = CapabilityRegistry()
+    registry.register(CapabilityDescriptor("echo", "work", "Echo value", {"type": "object"}), lambda value: value)
+    updates = []
+    session = ConversationSession(str(uuid4()), llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
+
+    assert session.run("hello", progress=updates.append) == "finished"
+
+    kinds = [item.kind for item in updates]
+    assert kinds[:2] == ["turn_started", "llm_waiting"]
+    assert "capability_started" in kinds
+    assert "capability_completed" in kinds
+    assert kinds[-1] == "turn_completed"
+    assert all("private planning" not in item.message for item in updates)
+
+
+def test_session_cooperatively_cancels_after_model_returns(tmp_path: Path) -> None:
+    token = CancellationToken()
+
+    class CancellingLLM:
+        def complete(self, messages, *, tools=()):
+            token.cancel()
+            return {"choices": [{"message": {"content": "must not be committed"}}]}
+
+    session = ConversationSession(
+        str(uuid4()),
+        llm=CancellingLLM(),
+        capabilities=CapabilityRegistry(),
+        memory=TextMemory(tmp_path),
+    )
+    updates = []
+
+    with pytest.raises(SessionCancelled, match="interrupted"):
+        session.run("cancel me", progress=updates.append, cancellation=token)
+
+    assert [message.role for message in session.history] == ["system", "user"]
+    assert updates[-1].kind == "turn_cancelled"
 
 
 def _temperature_event(source: str = "/event.py") -> EventDescriptor:
@@ -174,3 +215,30 @@ def test_event_service_returns_timeout_notification() -> None:
     )
     assert notification.status == "timeout"
     assert "temperature > 40" in notification.message
+
+
+def test_event_service_cancels_pending_wait_when_interrupted() -> None:
+    pool = EventPool()
+    pool.register(_temperature_event())
+    cancelled = [False]
+
+    class IdleSupervisor:
+        def poll_once(self):
+            return ()
+
+    def sleeper(_: float) -> None:
+        cancelled[0] = True
+
+    service = EventService(pool, IdleSupervisor(), poll_interval=0.01, sleeper=sleeper)  # type: ignore[arg-type]
+
+    with pytest.raises(InterruptedError, match="interrupted"):
+        service.wait(
+            session_id="session",
+            event="monitor_temperature",
+            operator=">",
+            expected=40,
+            timeout=1,
+            is_cancelled=lambda: cancelled[0],
+        )
+
+    assert pool.pending_sources() == ()

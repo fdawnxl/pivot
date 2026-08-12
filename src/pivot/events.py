@@ -386,12 +386,23 @@ class EventService:
             },
         )
 
-    def wait(self, *, session_id: str, event: str, operator: str, expected: Any, timeout: float) -> EventNotification:
+    def wait(
+        self,
+        *,
+        session_id: str,
+        event: str,
+        operator: str,
+        expected: Any,
+        timeout: float,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> EventNotification:
         if timeout > self.max_wait:
             raise EventError(f"Event timeout exceeds configured maximum ({self.max_wait:g} seconds)")
         request = self.pool.create_wait(event, session_id, operator, expected, timeout)
         try:
             while True:
+                if is_cancelled is not None and is_cancelled():
+                    raise InterruptedError("Event wait interrupted by the caller")
                 self.supervisor.poll_once()
                 notification = self.pool.take_completion(request.wait_id)
                 if notification is not None:

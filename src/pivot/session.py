@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
-from typing import Any
+import threading
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from .capabilities import CapabilityError, CapabilityRegistry
@@ -21,6 +23,57 @@ LOGGER = logging.getLogger(__name__)
 
 class SessionError(RuntimeError):
     """Raised when a session cannot make progress."""
+
+
+class SessionCancelled(SessionError):
+    """Raised when the caller interrupts an active conversation turn."""
+
+
+class CancellationToken:
+    """Thread-safe cooperative cancellation signal for one conversation turn."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation at the next safe session boundary."""
+
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        """Return whether cancellation was requested."""
+
+        return self._event.is_set()
+
+
+ProgressKind = Literal[
+    "turn_started",
+    "llm_waiting",
+    "assistant_update",
+    "capability_started",
+    "capability_completed",
+    "capability_failed",
+    "event_wait_started",
+    "event_completed",
+    "turn_completed",
+    "turn_cancelled",
+    "turn_failed",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionProgress:
+    """A user-safe progress update emitted while a session is working."""
+
+    kind: ProgressKind
+    session_id: str
+    message: str
+    round_number: int | None = None
+    name: str | None = None
+    result: Any = None
+
+
+ProgressCallback = Callable[[SessionProgress], None]
 
 
 def normalize_session_id(session_id: str) -> str:
@@ -103,29 +156,50 @@ class ConversationSession:
         lines = [json.dumps(message.as_dict(), ensure_ascii=False, default=str) for message in self.history]
         self.memory.write(self.session_id, "\n".join(lines) + ("\n" if lines else ""))
 
-    def run(self, user_input: str) -> str:
+    def run(
+        self,
+        user_input: str,
+        *,
+        progress: ProgressCallback | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
         with log_context(correlation_id=str(uuid4()), session_id=self.session_id):
-            return self._run_correlated(user_input)
+            return self._run_correlated(user_input, progress=progress, cancellation=cancellation)
 
-    def _run_correlated(self, user_input: str) -> str:
+    def _run_correlated(
+        self,
+        user_input: str,
+        *,
+        progress: ProgressCallback | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
         """Run one turn under the correlation context established by ``run``."""
 
         if not user_input.strip():
             raise ValueError("user_input must not be empty")
+        self._raise_if_cancelled(cancellation, progress)
         if not self.history:
             self.history.append(self._context_message())
         self.history.append(Message(role="user", content=user_input))
         self._persist()
+        rollback_to = len(self.history)
         LOGGER.info("Session turn started session_id=%s input_length=%d", self.session_id, len(user_input))
+        self._emit_progress(progress, "turn_started", "Turn started.")
         for round_number in range(1, self.max_rounds + 1):
+            self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
             LOGGER.debug("Session LLM round started session_id=%s round=%d", self.session_id, round_number)
+            self._emit_progress(progress, "llm_waiting", "Waiting for the model.", round_number=round_number)
             try:
                 tools = self.capabilities.llm_tools() + (self.event_service.llm_tools() if self.event_service else ())
                 raw = self.llm.complete(self.history, tools=tools)
+                self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
                 response = parse_response(raw)
+            except SessionCancelled:
+                raise
             except Exception as exc:
                 # Preserve a stable public exception while logging the implementation detail.
                 LOGGER.exception("Session %s failed in LLM round %d", self.session_id, round_number)
+                self._emit_progress(progress, "turn_failed", f"LLM round failed: {type(exc).__name__}.", round_number=round_number)
                 raise SessionError(f"LLM round {round_number} failed: {type(exc).__name__}: {exc}") from exc
             self.history.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls))
             LOGGER.debug(
@@ -138,23 +212,123 @@ class ConversationSession:
             if not response.tool_calls:
                 self._persist()
                 LOGGER.info("Session turn completed session_id=%s rounds=%d", self.session_id, round_number)
+                self._emit_progress(progress, "turn_completed", "Turn completed.", round_number=round_number, result=response.text)
                 return response.text
+            if response.text.strip():
+                self._emit_progress(
+                    progress,
+                    "assistant_update",
+                    response.text.strip(),
+                    round_number=round_number,
+                )
             for call in response.tool_calls:
+                self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
                 try:
                     if call.name == EVENT_WAIT_TOOL:
-                        result = self._wait_for_event(call)
+                        self._emit_progress(
+                            progress,
+                            "event_wait_started",
+                            f"Waiting for event {call.arguments.get('event', 'unknown')}.",
+                            round_number=round_number,
+                            name=call.name,
+                            result=call.arguments,
+                        )
+                        result = self._wait_for_event(
+                            call,
+                            cancellation=cancellation,
+                            progress=progress,
+                            round_number=round_number,
+                            rollback_to=rollback_to,
+                        )
+                        self._emit_progress(
+                            progress,
+                            "event_completed",
+                            f"Event wait finished with status {result.get('status', 'unknown')}.",
+                            round_number=round_number,
+                            name=call.name,
+                            result=result,
+                        )
                     else:
+                        self._emit_progress(
+                            progress,
+                            "capability_started",
+                            f"Running capability {call.name}.",
+                            round_number=round_number,
+                            name=call.name,
+                            result=call.arguments,
+                        )
                         result = self.capabilities.execute(call)
+                        self._emit_progress(
+                            progress,
+                            "capability_completed",
+                            f"Capability {call.name} completed.",
+                            round_number=round_number,
+                            name=call.name,
+                            result=result,
+                        )
                     encoded = json.dumps(result, ensure_ascii=False)
                 except (CapabilityError, EventError) as exc:
                     LOGGER.warning("Session capability call failed session_id=%s capability=%s", self.session_id, call.name)
+                    self._emit_progress(
+                        progress,
+                        "capability_failed" if call.name != EVENT_WAIT_TOOL else "event_completed",
+                        f"{call.name} failed: {exc}.",
+                        round_number=round_number,
+                        name=call.name,
+                        result={"error": str(exc)},
+                    )
                     encoded = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 self.history.append(Message(role="tool", content=encoded, name=call.name, tool_call_id=call.call_id))
+                self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
             self._persist()
         LOGGER.error("Session exceeded maximum rounds session_id=%s max_rounds=%d", self.session_id, self.max_rounds)
+        self._emit_progress(progress, "turn_failed", f"Maximum rounds reached ({self.max_rounds}).")
         raise SessionError(f"Session exceeded maximum LLM rounds ({self.max_rounds})")
 
-    def _wait_for_event(self, call: ToolCall) -> dict[str, Any]:
+    def _emit_progress(
+        self,
+        callback: ProgressCallback | None,
+        kind: ProgressKind,
+        message: str,
+        *,
+        round_number: int | None = None,
+        name: str | None = None,
+        result: Any = None,
+    ) -> None:
+        if callback is None:
+            return
+        update = SessionProgress(kind, self.session_id, message, round_number, name, result)
+        try:
+            callback(update)
+        except Exception as exc:
+            LOGGER.warning("Session progress callback failed session_id=%s error_type=%s", self.session_id, type(exc).__name__)
+
+    def _raise_if_cancelled(
+        self,
+        cancellation: CancellationToken | None,
+        progress: ProgressCallback | None,
+        *,
+        round_number: int | None = None,
+        rollback_to: int | None = None,
+    ) -> None:
+        if cancellation is None or not cancellation.is_cancelled():
+            return
+        LOGGER.info("Session turn interrupted session_id=%s round=%s", self.session_id, round_number or "pending")
+        if rollback_to is not None:
+            del self.history[rollback_to:]
+        self._persist()
+        self._emit_progress(progress, "turn_cancelled", "Turn interrupted by the user.", round_number=round_number)
+        raise SessionCancelled("Turn interrupted by the user")
+
+    def _wait_for_event(
+        self,
+        call: ToolCall,
+        *,
+        cancellation: CancellationToken | None = None,
+        progress: ProgressCallback | None = None,
+        round_number: int | None = None,
+        rollback_to: int | None = None,
+    ) -> dict[str, Any]:
         if self.event_service is None:
             raise EventError("Event service is not available")
         required = {"event", "operator", "expected", "timeout"}
@@ -165,13 +339,23 @@ class ConversationSession:
         timeout = call.arguments["timeout"]
         if not isinstance(event, str) or not isinstance(operator_name, str) or not isinstance(timeout, (int, float)):
             raise EventError("Event wait has invalid argument types")
-        notification = self.event_service.wait(
-            session_id=self.session_id,
-            event=event,
-            operator=operator_name,
-            expected=call.arguments["expected"],
-            timeout=float(timeout),
-        )
+        try:
+            notification = self.event_service.wait(
+                session_id=self.session_id,
+                event=event,
+                operator=operator_name,
+                expected=call.arguments["expected"],
+                timeout=float(timeout),
+                is_cancelled=cancellation.is_cancelled if cancellation else None,
+            )
+        except InterruptedError:
+            self._raise_if_cancelled(
+                cancellation,
+                progress,
+                round_number=round_number,
+                rollback_to=rollback_to,
+            )
+            raise
         return notification.as_dict()
 
 
@@ -197,5 +381,17 @@ class SessionManager:
             LOGGER.info("Session created session_id=%s", canonical)
         return self._sessions[canonical]
 
-    def run(self, session_id: str, user_input: str) -> str:
-        return self.get(session_id).run(user_input)
+    def run(
+        self,
+        session_id: str,
+        user_input: str,
+        *,
+        progress: ProgressCallback | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
+        return self.get(session_id).run(user_input, progress=progress, cancellation=cancellation)
+
+    def sessions(self) -> tuple[ConversationSession, ...]:
+        """Return sessions in stable UUID order for interactive status displays."""
+
+        return tuple(self._sessions[key] for key in sorted(self._sessions))

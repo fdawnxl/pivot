@@ -12,13 +12,15 @@ PIVOT_WORKSPACE_PATH=/path/to/workspace uv run pivot
 PIVOT_WORKSPACE_PATH=/path/to/workspace uv run pivot "Hello"
 ```
 
-The interactive CLI keeps one UUID conversation active and supports `/help`, `/session`, `/new` and `/exit`. Resume an existing conversation with:
+The interactive CLI is a Textual application with a persistent prompt, Markdown conversation timeline, responsive session sidebar, and inspectable agent trace. Each trace groups model analysis phases, model-provided decision summaries, capability arguments and results, event waits, and result-integration rounds without exposing hidden chain-of-thought. Agent turns run in background workers, so another conversation can be opened while one is working.
+
+Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+N` for a new conversation, `Ctrl+Left`/`Ctrl+Right` to enter the session sidebar and navigate older or newer conversations, `Ctrl+B` to toggle the sidebar, `Ctrl+G` to interrupt the selected conversation, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The bottom shortcut bar shows these common actions and is also clickable. The prompt accepts `/new`, `/next`, `/prev`, `/switch <id-prefix>`, `/session`, `/sessions`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits stop during polling, while a synchronous model or capability request stops at its next safe boundary. The same runtime is also available through `pivot.PivotClient` for services and other clients that do not use the terminal UI. Resume an existing conversation with:
 
 ```bash
 PIVOT_WORKSPACE_PATH=/path/to/workspace uv run pivot --session 4b3c9f24-582c-42b1-bf25-f24a6f907f67
 ```
 
-At startup pivot displays its ASCII logo, model, endpoint, conversation UUID, capabilities and events. Use `--no-banner` to suppress that summary.
+The TUI shows the selected provider, model, conversation, capabilities, and events without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
 The repository also contains a local example workspace at `.tmp/workspace`. It is ignored by git and can be used immediately:
 
