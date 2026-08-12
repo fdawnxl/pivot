@@ -8,7 +8,7 @@ from pivot.capabilities import CapabilityRegistry
 from pivot.cli import Runtime, _run_interactive
 from pivot.config import PivotConfig
 from pivot.credentials import ProviderCredential
-from pivot.events import EventPool
+from pivot.events import EventPool, EventService, EventSupervisor
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, EventDescriptor
 from pivot.session import SessionManager
@@ -27,7 +27,7 @@ def test_banner_contains_runtime_summary_and_safe_endpoint() -> None:
         endpoint=safe_endpoint("https://user:secret@example.test/v1?token=secret"),
         session_id=session_id,
         capabilities=(CapabilityDescriptor("read", "measure", "Read"),),
-        events=(EventDescriptor("ready", "Ready", "state", "is", "ready"),),
+        events=(EventDescriptor("ready", "Ready", "state", ("==",)),),
     )
     banner = render_banner(summary)
     assert "____  _" in banner
@@ -43,7 +43,8 @@ def test_interactive_cli_reuses_and_creates_uuid_sessions(tmp_path: Path) -> Non
     events = EventPool()
     manager = SessionManager(llm=EchoLLM(), capabilities=registry, memory=TextMemory(tmp_path / "memory"))
     config = PivotConfig(workspace_path=tmp_path, provider=ProviderCredential("test", "test-model"))
-    runtime = Runtime(config, registry, events, manager)
+    event_service = EventService(events, EventSupervisor(events, runner=None))  # type: ignore[arg-type]
+    runtime = Runtime(config, registry, events, event_service, manager)
     session = manager.create()
     output = StringIO()
 

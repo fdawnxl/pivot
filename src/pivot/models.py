@@ -71,14 +71,21 @@ class CapabilityDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class EventDescriptor:
-    """A serializable event definition visible to the model."""
+    """A generic observable field with supported dynamic conditions."""
 
     name: str
     description: str
     field: str
-    operator: str
-    expected: Any
+    operators: tuple[str, ...]
+    templates: dict[str, str] = field(default_factory=dict)
+    timeout_template: str = "Waiting for {condition} timed out after {timeout:g} seconds."
+    error_template: str = "Waiting for {condition} failed: {error}."
     source: str | None = None
 
     def as_prompt_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "description": self.description, "field": self.field, "operator": self.operator, "expected": self.expected}
+        return {
+            "name": self.name,
+            "description": self.description,
+            "field": self.field,
+            "operators": list(self.operators),
+        }

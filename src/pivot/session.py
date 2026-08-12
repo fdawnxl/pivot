@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from .capabilities import CapabilityError, CapabilityRegistry
-from .events import EventPool
+from .events import EVENT_WAIT_TOOL, EventError, EventPool, EventService
 from .llm import LLMClient
 from .logging import log_context
 from .memory import TextMemory
@@ -43,6 +43,7 @@ class ConversationSession:
         capabilities: CapabilityRegistry,
         memory: TextMemory | None = None,
         events: EventPool | None = None,
+        event_service: EventService | None = None,
         max_rounds: int = 8,
     ) -> None:
         if max_rounds < 1:
@@ -52,6 +53,7 @@ class ConversationSession:
         self.capabilities = capabilities
         self.memory = memory
         self.events = events
+        self.event_service = event_service
         self.max_rounds = max_rounds
         self.history: list[Message] = []
         self._restore()
@@ -118,7 +120,8 @@ class ConversationSession:
         for round_number in range(1, self.max_rounds + 1):
             LOGGER.debug("Session LLM round started session_id=%s round=%d", self.session_id, round_number)
             try:
-                raw = self.llm.complete(self.history, tools=self.capabilities.llm_tools())
+                tools = self.capabilities.llm_tools() + (self.event_service.llm_tools() if self.event_service else ())
+                raw = self.llm.complete(self.history, tools=tools)
                 response = parse_response(raw)
             except Exception as exc:
                 # Preserve a stable public exception while logging the implementation detail.
@@ -138,15 +141,38 @@ class ConversationSession:
                 return response.text
             for call in response.tool_calls:
                 try:
-                    result = self.capabilities.execute(call)
-                    encoded = json.dumps(result, ensure_ascii=False, default=str)
-                except CapabilityError as exc:
+                    if call.name == EVENT_WAIT_TOOL:
+                        result = self._wait_for_event(call)
+                    else:
+                        result = self.capabilities.execute(call)
+                    encoded = json.dumps(result, ensure_ascii=False)
+                except (CapabilityError, EventError) as exc:
                     LOGGER.warning("Session capability call failed session_id=%s capability=%s", self.session_id, call.name)
                     encoded = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 self.history.append(Message(role="tool", content=encoded, name=call.name, tool_call_id=call.call_id))
             self._persist()
         LOGGER.error("Session exceeded maximum rounds session_id=%s max_rounds=%d", self.session_id, self.max_rounds)
         raise SessionError(f"Session exceeded maximum LLM rounds ({self.max_rounds})")
+
+    def _wait_for_event(self, call: ToolCall) -> dict[str, Any]:
+        if self.event_service is None:
+            raise EventError("Event service is not available")
+        required = {"event", "operator", "expected", "timeout"}
+        if set(call.arguments) != required:
+            raise EventError(f"Event wait arguments must be exactly: {', '.join(sorted(required))}")
+        event = call.arguments["event"]
+        operator_name = call.arguments["operator"]
+        timeout = call.arguments["timeout"]
+        if not isinstance(event, str) or not isinstance(operator_name, str) or not isinstance(timeout, (int, float)):
+            raise EventError("Event wait has invalid argument types")
+        notification = self.event_service.wait(
+            session_id=self.session_id,
+            event=event,
+            operator=operator_name,
+            expected=call.arguments["expected"],
+            timeout=float(timeout),
+        )
+        return notification.as_dict()
 
 
 class SessionManager:

@@ -1,8 +1,11 @@
+from __future__ import annotations
+
+import json
 from pathlib import Path
 from uuid import uuid4
 
 from pivot.capabilities import CapabilityRegistry
-from pivot.events import EventPool, EventScriptRunner, EventSupervisor, load_event_scripts_isolated
+from pivot.events import EVENT_WAIT_TOOL, EventError, EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, EventDescriptor
 from pivot.session import ConversationSession
@@ -30,32 +33,134 @@ def test_session_executes_tools_and_persists(tmp_path: Path) -> None:
     assert len(restored.history) == len(session.history)
 
 
-def test_event_pool_notifies_matching_waiters() -> None:
+def _temperature_event(source: str = "/event.py") -> EventDescriptor:
+    return EventDescriptor(
+        "monitor_temperature",
+        "Monitor a temperature sensor with a condition chosen at wait time.",
+        "temperature",
+        (">", ">=", "<", "<=", "==", "!="),
+        templates={">": "The sensor temperature reached {condition}; current value is {value}."},
+        timeout_template="Temperature condition {condition} did not occur within {timeout:g} seconds.",
+        error_template="Temperature monitoring for {condition} failed: {error}.",
+        source=source,
+    )
+
+
+def test_event_pool_supports_dynamic_conditions_and_fifo() -> None:
     pool = EventPool()
-    pool.register(EventDescriptor("hot", "Temperature is high", "temperature", ">", 40))
-    seen: list[str] = []
-    pool.wait("hot", "session", lambda notification: seen.append(notification.event_name))
-    assert pool.report("hot", {"temperature": 41}) == ("session",)
-    assert seen == ["hot"]
+    pool.register(_temperature_event())
+    first = pool.create_wait("monitor_temperature", "session-a", ">", 40, 10)
+    second = pool.create_wait("monitor_temperature", "session-b", ">", 50, 10)
+
+    notified = pool.report_source("/event.py", {"temperature": 45})
+
+    assert [item.wait_id for item in notified] == [first.wait_id]
+    assert notified[0].status == "matched"
+    assert "temperature > 40" in notified[0].message
+    assert "current value is 45" in notified[0].message
+    assert pool.take_completion(second.wait_id) is None
 
 
-def test_isolated_event_runner_and_supervisor(tmp_path: Path) -> None:
+def test_event_pool_injects_timeout_and_error_messages() -> None:
+    now = [0.0]
+    pool = EventPool(clock=lambda: now[0])
+    pool.register(_temperature_event())
+    timed = pool.create_wait("monitor_temperature", "session", "<=", 5, 3)
+    now[0] = 3.0
+    timeout = pool.expire()[0]
+    assert timeout.wait_id == timed.wait_id
+    assert timeout.status == "timeout"
+    assert "within 3 seconds" in timeout.message
+
+    failed = pool.create_wait("monitor_temperature", "session", ">", 40, 5)
+    error = pool.fail_source("/event.py", "sensor offline")[0]
+    assert error.wait_id == failed.wait_id
+    assert error.status == "error"
+    assert "sensor offline" in error.message
+
+
+def test_isolated_event_runner_discovers_generic_source(tmp_path: Path) -> None:
     event_root = tmp_path / "events"
     event_root.mkdir()
     environment = tmp_path / "event-env"
     environment.mkdir()
     (environment / "pyproject.toml").write_text(
-        '[project]\nname = "test-event-env"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n', encoding="utf-8"
+        '[project]\nname="test-event-env"\nversion="0.1.0"\nrequires-python=">=3.11"\ndependencies=[]\n',
+        encoding="utf-8",
     )
-    (event_root / "sample.py").write_text(
-        "import json, os\nD={'name':'hot','description':'hot','field':'temperature','operator':'>=','expected':40}\n"
-        "import sys\nprint(json.dumps([D] if '-l' in sys.argv else {'temperature': 42}))\n", encoding="utf-8"
+    script = event_root / "sample.py"
+    script.write_text(
+        "import json,sys\n"
+        "D={'name':'monitor_temperature','description':'temperature','field':'temperature','operators':['>','<']}\n"
+        "print(json.dumps([D] if '-l' in sys.argv else {'temperature':42}))\n",
+        encoding="utf-8",
     )
-    runner = EventScriptRunner(str(environment))
-    events = load_event_scripts_isolated(str(event_root), runner)
+    runner = EventScriptRunner(environment)
+    events = load_event_scripts_isolated(event_root, runner)
+    assert events[0].name == "monitor_temperature"
+    assert events[0].operators == (">", "<")
+
+
+class ImmediateSupervisor:
+    def __init__(self, pool: EventPool) -> None:
+        self.pool = pool
+
+    def poll_once(self):
+        return self.pool.report_source("/event.py", {"temperature": 42})
+
+
+class EventLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.wake_message = ""
+
+    def complete(self, messages, *, tools=()):
+        self.calls += 1
+        if self.calls == 1:
+            assert any(tool["function"]["name"] == EVENT_WAIT_TOOL for tool in tools)
+            return {
+                "choices": [{"message": {"tool_calls": [{"id": "wait-1", "function": {"name": EVENT_WAIT_TOOL, "arguments": '{"event":"monitor_temperature","operator":">","expected":40,"timeout":5}'}}]}}]
+            }
+        tool_message = messages[-1]
+        self.wake_message = json.loads(tool_message.content)["message"]
+        return {"choices": [{"message": {"content": "Temperature reached the requested threshold."}}]}
+
+
+def test_event_completion_is_injected_and_resumes_llm() -> None:
     pool = EventPool()
-    pool.register(events[0])
-    seen: list[str] = []
-    pool.wait("hot", "s1", lambda notification: seen.append(notification.event_name))
-    assert EventSupervisor(pool, str(event_root), runner).poll_once() == {"hot": ("s1",)}
-    assert seen == ["hot"]
+    pool.register(_temperature_event())
+    service = EventService(pool, ImmediateSupervisor(pool), poll_interval=0.01, sleeper=lambda _: None)  # type: ignore[arg-type]
+    llm = EventLLM()
+    session = ConversationSession(str(uuid4()), llm=llm, capabilities=CapabilityRegistry(), events=pool, event_service=service)
+
+    response = session.run("Wait until the temperature is above 40")
+
+    assert response == "Temperature reached the requested threshold."
+    assert "current value is 42" in llm.wake_message
+
+
+def test_event_service_returns_timeout_notification() -> None:
+    now = [0.0]
+    pool = EventPool(clock=lambda: now[0])
+    pool.register(_temperature_event())
+
+    class NonMatchingSupervisor:
+        def poll_once(self):
+            pool.report_source("/event.py", {"temperature": 20})
+            return pool.expire()
+
+    service = EventService(
+        pool,
+        NonMatchingSupervisor(),  # type: ignore[arg-type]
+        poll_interval=0.5,
+        sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    notification = service.wait(
+        session_id="session",
+        event="monitor_temperature",
+        operator=">",
+        expected=40,
+        timeout=1,
+    )
+    assert notification.status == "timeout"
+    assert "temperature > 40" in notification.message

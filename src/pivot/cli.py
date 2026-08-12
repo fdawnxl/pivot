@@ -11,7 +11,7 @@ from typing import TextIO
 from .capabilities import CapabilityRegistry
 from .capabilities.discovery import register_workspace_capabilities
 from .config import ConfigurationError, PivotConfig
-from .events import EventPool, EventScriptRunner, load_event_scripts_isolated
+from .events import EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
 from .llm import LiteLLMClient
 from .logging import configure_logging
 from .memory import TextMemory
@@ -28,6 +28,7 @@ class Runtime:
     config: PivotConfig
     registry: CapabilityRegistry
     events: EventPool
+    event_service: EventService
     sessions: SessionManager
 
 
@@ -58,6 +59,12 @@ def build_runtime(config: PivotConfig) -> Runtime:
             event_pool.register(event)
         except Exception as exc:
             LOGGER.warning("Unable to register workspace event %s: %s", event.name, exc)
+    event_service = EventService(
+        event_pool,
+        EventSupervisor(event_pool, event_runner),
+        poll_interval=config.event_poll_interval,
+        max_wait=config.event_max_wait,
+    )
     manager = SessionManager(
         llm=LiteLLMClient(
             config.provider.model,
@@ -68,10 +75,11 @@ def build_runtime(config: PivotConfig) -> Runtime:
         capabilities=registry,
         memory=TextMemory(config.workspace_path / "memory"),
         events=event_pool,
+        event_service=event_service,
         max_rounds=config.max_rounds,
     )
     LOGGER.info("Runtime assembly completed capabilities=%d events=%d", len(registry.descriptors()), len(event_pool.descriptors()))
-    return Runtime(config, registry, event_pool, manager)
+    return Runtime(config, registry, event_pool, event_service, manager)
 
 
 def _show_banner(runtime: Runtime, session: ConversationSession, stream: TextIO) -> None:

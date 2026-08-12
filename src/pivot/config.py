@@ -33,6 +33,8 @@ class PivotConfig:
     max_rounds: int = 8
     llm_timeout: float = 120.0
     capability_timeout: float = 15.0
+    event_poll_interval: float = 1.0
+    event_max_wait: float = 3600.0
     log_console_level: str = "INFO"
     log_file_level: str = "DEBUG"
 
@@ -87,10 +89,18 @@ class PivotConfig:
             max_rounds=get("max_rounds", 8, int),
             llm_timeout=get("llm_timeout", 120.0, float),
             capability_timeout=get("capability_timeout", 15.0, float),
+            event_poll_interval=get("event_poll_interval", 1.0, float),
+            event_max_wait=get("event_max_wait", 3600.0, float),
             log_console_level=_validate_log_level(console_level, setting="display log level"),
             log_file_level=_validate_log_level(file_level, setting="storage log level"),
         )
-        if config.max_rounds < 1 or config.llm_timeout <= 0 or config.capability_timeout <= 0:
+        if (
+            config.max_rounds < 1
+            or config.llm_timeout <= 0
+            or config.capability_timeout <= 0
+            or config.event_poll_interval <= 0
+            or config.event_max_wait <= 0
+        ):
             raise ConfigurationError("max_rounds and timeouts must be greater than zero")
         config.ensure_workspace()
         configure_logging(
