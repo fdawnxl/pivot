@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from ..models import CapabilityKind
 from .registry import CapabilityError, CapabilityRegistry, CapabilityScriptRunner
@@ -42,22 +44,22 @@ def register_workspace_capabilities(
     LOGGER.info("Workspace capability discovery completed loaded=%d root=%s", loaded, root / "capabilities")
 
 
-def _think_reader(runner: CapabilityScriptRunner, script: Path):
+def _think_reader(runner: CapabilityScriptRunner, script: Path) -> Callable[[], str]:
     def read() -> str:
         return runner.read_think(script)
 
     return read
 
 
-def _measure_handler(runner: CapabilityScriptRunner, script: Path):
-    def read(feature: str):
+def _measure_handler(runner: CapabilityScriptRunner, script: Path) -> Callable[[str], Any]:
+    def read(feature: str) -> Any:
         return runner.read_measure(script, feature)
 
     return read
 
 
-def _work_handler(runner: CapabilityScriptRunner, script: Path):
-    def execute(**arguments):
+def _work_handler(runner: CapabilityScriptRunner, script: Path) -> Callable[..., Any]:
+    def execute(**arguments: Any) -> Any:
         return runner.execute_work(script, arguments)
 
     return execute
