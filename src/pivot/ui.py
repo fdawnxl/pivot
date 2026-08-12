@@ -21,6 +21,7 @@ ASCII_LOGO = r"""
 class RuntimeSummary:
     """Safe, user-facing runtime metadata displayed at startup."""
 
+    provider: str
     model: str
     endpoint: str
     session_id: str
@@ -52,6 +53,7 @@ def render_banner(summary: RuntimeSummary) -> str:
     return "\n".join(
         (
             ASCII_LOGO,
+            f"Provider     : {summary.provider}",
             f"Model        : {summary.model}",
             f"Endpoint     : {summary.endpoint}",
             f"Conversation : {summary.session_id}",

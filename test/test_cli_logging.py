@@ -23,6 +23,7 @@ class EchoLLM:
 def test_banner_contains_runtime_summary_and_safe_endpoint() -> None:
     session_id = "4b3c9f24-582c-42b1-bf25-f24a6f907f67"
     summary = RuntimeSummary(
+        provider="test-provider",
         model="test-model",
         endpoint=safe_endpoint("https://user:secret@example.test/v1?token=secret"),
         session_id=session_id,
@@ -32,6 +33,7 @@ def test_banner_contains_runtime_summary_and_safe_endpoint() -> None:
     banner = render_banner(summary)
     assert "____  _" in banner
     assert "test-model" in banner
+    assert "test-provider" in banner
     assert session_id in banner
     assert "measure:read" in banner
     assert "ready" in banner

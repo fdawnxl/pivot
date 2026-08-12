@@ -84,6 +84,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
 
 def _show_banner(runtime: Runtime, session: ConversationSession, stream: TextIO) -> None:
     summary = RuntimeSummary(
+        provider=runtime.config.provider.name,
         model=runtime.config.provider.model,
         endpoint=safe_endpoint(runtime.config.provider.api_base),
         session_id=session.session_id,
