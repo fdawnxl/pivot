@@ -44,7 +44,7 @@ workspace/
 ├── logs/pivot.log
 ├── memory/<conversation-uuid>/history.jsonl
 ├── config.toml
-└── credentials.json        # optional, created when credentials are saved
+└── credentials.toml        # named LLM providers, mode 0600
 ```
 
 LiteLLM is a core dependency and is installed by `uv sync`:
@@ -53,7 +53,27 @@ LiteLLM is a core dependency and is installed by `uv sync`:
 uv sync
 ```
 
-Configuration precedence is environment variable (`PIVOT_MODEL`, `PIVOT_API_BASE`, `PIVOT_API_KEY`, `PIVOT_MAX_ROUNDS`, etc.), then workspace `config.toml`/`credentials.json`, then code defaults. `credentials.json` is owner-readable only and is never written to `config.toml` or logs.
+`credentials.toml` owns complete provider connections and is restricted to mode `0600`:
+
+```toml
+[providers.local]
+model = "openai/local-model"
+api_base = "http://127.0.0.1:8000/v1"
+api_key = "provider-secret"
+
+[providers.cloud]
+model = "openai/gpt-4o-mini"
+api_key = "provider-secret"
+```
+
+`config.toml` only selects one provider and configures runtime behavior:
+
+```toml
+provider = "local"
+max_rounds = 8
+```
+
+`PIVOT_PROVIDER` overrides the selected provider. Other runtime settings use `PIVOT_<NAME>`, then `config.toml`, then code defaults. Model names, API endpoints, and API keys are read only from `credentials.toml` and are never written to ordinary configuration or logs.
 
 Terminal and persisted log levels are independent. Supported values are `debug`, `info`, `warn` and `error`:
 

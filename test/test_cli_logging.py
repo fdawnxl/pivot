@@ -7,6 +7,7 @@ from uuid import UUID
 from pivot.capabilities import CapabilityRegistry
 from pivot.cli import Runtime, _run_interactive
 from pivot.config import PivotConfig
+from pivot.credentials import ProviderCredential
 from pivot.events import EventPool
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, EventDescriptor
@@ -41,7 +42,7 @@ def test_interactive_cli_reuses_and_creates_uuid_sessions(tmp_path: Path) -> Non
     registry = CapabilityRegistry()
     events = EventPool()
     manager = SessionManager(llm=EchoLLM(), capabilities=registry, memory=TextMemory(tmp_path / "memory"))
-    config = PivotConfig(workspace_path=tmp_path)
+    config = PivotConfig(workspace_path=tmp_path, provider=ProviderCredential("test", "test-model"))
     runtime = Runtime(config, registry, events, manager)
     session = manager.create()
     output = StringIO()

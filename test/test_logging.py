@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from pivot.config import ConfigurationError, PivotConfig
+from pivot.credentials import CredentialStore, ProviderCredential
 from pivot.logging import configure_logging
 
 
@@ -33,8 +34,9 @@ def test_logging_level_environment_precedence(tmp_path: Path, monkeypatch: pytes
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "config.toml").write_text(
-        '[logging]\nlog_console_level = "error"\nlog_file_level = "info"\n', encoding="utf-8"
+        'provider = "test"\n[logging]\nlog_console_level = "error"\nlog_file_level = "info"\n', encoding="utf-8"
     )
+    CredentialStore(workspace / "credentials.toml").save({"test": ProviderCredential("test", "model")})
     monkeypatch.setenv("PIVOT_LOG_STORAGE_LEVEL", "debug")
     config = PivotConfig.load(workspace_path=workspace)
     assert config.log_console_level == "ERROR"
@@ -44,6 +46,7 @@ def test_logging_level_environment_precedence(tmp_path: Path, monkeypatch: pytes
 def test_invalid_logging_level_is_rejected(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "config.toml").write_text('[logging]\ndisplay_level = "verbose"\n', encoding="utf-8")
+    (workspace / "config.toml").write_text('provider = "test"\n[logging]\ndisplay_level = "verbose"\n', encoding="utf-8")
+    CredentialStore(workspace / "credentials.toml").save({"test": ProviderCredential("test", "model")})
     with pytest.raises(ConfigurationError):
         PivotConfig.load(workspace_path=workspace)

@@ -54,7 +54,12 @@ def build_runtime(config: PivotConfig) -> Runtime:
         except Exception as exc:
             LOGGER.warning("Unable to register workspace event %s: %s", event.name, exc)
     manager = SessionManager(
-        llm=LiteLLMClient(config.model, api_base=config.api_base, api_key=config.api_key, timeout=config.llm_timeout),
+        llm=LiteLLMClient(
+            config.provider.model,
+            api_base=config.provider.api_base,
+            api_key=config.provider.api_key,
+            timeout=config.llm_timeout,
+        ),
         capabilities=registry,
         memory=TextMemory(config.workspace_path / "memory"),
         events=event_pool,
@@ -66,8 +71,8 @@ def build_runtime(config: PivotConfig) -> Runtime:
 
 def _show_banner(runtime: Runtime, session: ConversationSession, stream: TextIO) -> None:
     summary = RuntimeSummary(
-        model=runtime.config.model,
-        endpoint=safe_endpoint(runtime.config.api_base),
+        model=runtime.config.provider.model,
+        endpoint=safe_endpoint(runtime.config.provider.api_base),
         session_id=session.session_id,
         capabilities=runtime.registry.descriptors(),
         events=runtime.events.descriptors(),

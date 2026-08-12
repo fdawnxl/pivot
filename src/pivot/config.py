@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .credentials import CredentialStore
+from .credentials import CredentialStore, ProviderCredential
 from .logging import configure_logging
 
 LOGGER = logging.getLogger(__name__)
@@ -29,10 +29,7 @@ def _validate_log_level(value: str, *, setting: str) -> str:
 @dataclass(frozen=True, slots=True)
 class PivotConfig:
     workspace_path: Path
-    model: str = "gpt-4o-mini"
-    api_base: str | None = None
-    api_key: str | None = None
-    provider: str | None = None
+    provider: ProviderCredential
     max_rounds: int = 8
     llm_timeout: float = 120.0
     log_console_level: str = "INFO"
@@ -56,12 +53,9 @@ class PivotConfig:
             except (OSError, tomllib.TOMLDecodeError) as exc:
                 raise ConfigurationError(f"Cannot load configuration {toml_file}: {exc}") from exc
 
-        llm_values = values.get("llm", {}) if isinstance(values.get("llm", {}), dict) else {}
         logging_values = values.get("logging", {}) if isinstance(values.get("logging", {}), dict) else {}
-        # Support both the initial flat schema and the clearer [llm] schema.
-        merged: dict[str, Any] = {**values, **llm_values, **logging_values}
-        credentials = CredentialStore(workspace / "credentials.json")
-        stored_credentials = credentials.read()
+        merged: dict[str, Any] = {**values, **logging_values}
+        providers = CredentialStore(workspace / "credentials.toml").read()
 
         def get(name: str, default: Any, cast: Any = str) -> Any:
             env_name = f"PIVOT_{name.upper()}"
@@ -80,12 +74,15 @@ class PivotConfig:
         file_level = os.getenv("PIVOT_LOG_STORAGE_LEVEL") or get(
             "log_file_level", merged.get("storage_level", legacy_log_level or "DEBUG")
         )
+        provider_name = get("provider", None)
+        if not provider_name:
+            raise ConfigurationError("PIVOT_PROVIDER or config.toml provider is required")
+        provider = providers.get(provider_name)
+        if provider is None:
+            raise ConfigurationError(f"Provider {provider_name!r} is not defined in credentials.toml")
         config = cls(
             workspace_path=workspace,
-            model=get("model", "gpt-4o-mini"),
-            api_base=get("api_base", None),
-            api_key=os.getenv("PIVOT_API_KEY") or stored_credentials.get("api_key"),
-            provider=get("provider", None),
+            provider=provider,
             max_rounds=get("max_rounds", 8, int),
             llm_timeout=get("llm_timeout", 120.0, float),
             log_console_level=_validate_log_level(console_level, setting="display log level"),
@@ -102,9 +99,9 @@ class PivotConfig:
         LOGGER.info("Workspace initialized path=%s", config.workspace_path)
         LOGGER.debug(
             "Configuration loaded model=%s provider=%s api_base_configured=%s max_rounds=%d llm_timeout=%g",
-            config.model,
-            config.provider or "auto",
-            config.api_base is not None,
+            config.provider.model,
+            config.provider.name,
+            config.provider.api_base is not None,
             config.max_rounds,
             config.llm_timeout,
         )
@@ -138,4 +135,4 @@ class PivotConfig:
             )
         config_file = self.workspace_path / "config.toml"
         if not config_file.exists():
-            config_file.write_text("# pivot workspace configuration\n", encoding="utf-8")
+            config_file.write_text("# pivot workspace configuration\n# provider = \"provider-name\"\n", encoding="utf-8")
