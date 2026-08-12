@@ -65,6 +65,7 @@ def test_workspace_capability_discovery_loads_all_kinds(tmp_path: Path) -> None:
     assert registry.execute(ToolCall(THINK_READER_NAME, {"name": "t"}))["content"] == "Full private planning method."
     assert registry.execute(ToolCall("m", {"feature": "temperature"})) == {"feature": "temperature"}
     assert registry.execute(ToolCall("w", {"value": 3})) == {"received": {"value": 3}}
+    assert registry.execute(ToolCall("w", {"_script": "/tmp/override"})) == {"received": {"_script": "/tmp/override"}}
 
 
 def test_registry_rejects_non_json_work_results() -> None:

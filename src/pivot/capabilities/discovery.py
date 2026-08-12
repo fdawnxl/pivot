@@ -31,21 +31,36 @@ def register_workspace_capabilities(
             try:
                 descriptor = runner.describe(script, capability_kind)
                 if kind == "think":
-                    registry.register_think(descriptor, lambda _script=script, _runner=runner: _runner.read_think(_script))
+                    registry.register_think(descriptor, _think_reader(runner, script))
                 elif kind == "measure":
-                    registry.register(
-                        descriptor,
-                        lambda feature, _script=script, _runner=runner: _runner.read_measure(_script, feature),
-                    )
+                    registry.register(descriptor, _measure_handler(runner, script))
                 else:
-                    registry.register(
-                        descriptor,
-                        lambda _script=script, _runner=runner, **arguments: _runner.execute_work(_script, arguments),
-                    )
+                    registry.register(descriptor, _work_handler(runner, script))
                 loaded += 1
             except CapabilityError as exc:
                 LOGGER.warning("Unable to register %s capability %s: %s", kind, script, exc)
     LOGGER.info("Workspace capability discovery completed loaded=%d root=%s", loaded, root / "capabilities")
+
+
+def _think_reader(runner: CapabilityScriptRunner, script: Path):
+    def read() -> str:
+        return runner.read_think(script)
+
+    return read
+
+
+def _measure_handler(runner: CapabilityScriptRunner, script: Path):
+    def read(feature: str):
+        return runner.read_measure(script, feature)
+
+    return read
+
+
+def _work_handler(runner: CapabilityScriptRunner, script: Path):
+    def execute(**arguments):
+        return runner.execute_work(script, arguments)
+
+    return execute
 
 
 __all__ = ["register_workspace_capabilities"]
