@@ -87,3 +87,11 @@ def test_selected_provider_must_exist(tmp_path: Path) -> None:
     CredentialStore(workspace / "credentials.toml").save({"local": ProviderCredential("local", "model")})
     with pytest.raises(ConfigurationError, match="not defined"):
         PivotConfig.load(workspace_path=workspace)
+
+
+def test_missing_provider_still_bootstraps_empty_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "new-workspace"
+    with pytest.raises(ConfigurationError, match="provider is required"):
+        PivotConfig.load(workspace_path=workspace)
+    assert (workspace / "config.toml").is_file()
+    assert (workspace / "environment/work/pyproject.toml").is_file()

@@ -46,6 +46,7 @@ class PivotConfig:
         if not explicit_workspace:
             raise ConfigurationError("PIVOT_WORKSPACE_PATH or --workspace is required")
         workspace = Path(explicit_workspace).expanduser().resolve()
+        _ensure_workspace(workspace)
         toml_file = Path(config_path).expanduser() if config_path else workspace / "config.toml"
         values: dict[str, Any] = {}
         if toml_file.is_file():
@@ -122,7 +123,13 @@ class PivotConfig:
     def ensure_workspace(self) -> None:
         """Create the documented workspace directories without overwriting user files."""
 
-        for relative in (
+        _ensure_workspace(self.workspace_path)
+
+
+def _ensure_workspace(workspace_path: Path) -> None:
+    """Bootstrap workspace files before provider validation can fail."""
+
+    for relative in (
             "capabilities/think",
             "capabilities/measure",
             "capabilities/work",
@@ -134,14 +141,14 @@ class PivotConfig:
             "environment/work",
             "environment/event",
         ):
-            (self.workspace_path / relative).mkdir(parents=True, exist_ok=True)
-        for kind in ("think", "measure", "work", "event"):
-            project = self.workspace_path / "environment" / kind / "pyproject.toml"
-            if not project.exists():
-                project.write_text(
-                    f'[project]\nname = "pivot-{kind}-environment"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n',
-                    encoding="utf-8",
-                )
-        config_file = self.workspace_path / "config.toml"
-        if not config_file.exists():
-            config_file.write_text("# pivot workspace configuration\n# provider = \"provider-name\"\n", encoding="utf-8")
+        (workspace_path / relative).mkdir(parents=True, exist_ok=True)
+    for kind in ("think", "measure", "work", "event"):
+        project = workspace_path / "environment" / kind / "pyproject.toml"
+        if not project.exists():
+            project.write_text(
+                f'[project]\nname = "pivot-{kind}-environment"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n',
+                encoding="utf-8",
+            )
+    config_file = workspace_path / "config.toml"
+    if not config_file.exists():
+        config_file.write_text("# pivot workspace configuration\n# provider = \"provider-name\"\n", encoding="utf-8")
