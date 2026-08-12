@@ -39,7 +39,7 @@ An empty workspace is initialized as follows. Existing files are never overwritt
 ```text
 workspace/
 ├── capabilities/{think,measure,work}/
-├── environment/{measure,event}/
+├── environment/{think,measure,work,event}/
 ├── events/
 ├── logs/pivot.log
 ├── memory/<conversation-uuid>/history.jsonl
@@ -89,7 +89,15 @@ The corresponding environment variables are `PIVOT_LOG_DISPLAY_LEVEL` and `PIVOT
 
 `pivot.config` bootstraps a workspace; `pivot.logging` configures terminal and rotating-file output; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts text and tool calls; `pivot.capabilities` validates and dispatches `think`, `measure` and `work` capabilities; `pivot.events` owns event definitions and FIFO waiters; `pivot.memory` writes UUID-isolated transcripts atomically; `pivot.session` runs the bounded conversation loop; and `pivot.orchestrator` runs independent agents concurrently.
 
-Measure scripts are invoked through `uv run --project <measure-environment> python <script> -l/-r <feature>` with a timeout. Their dependencies are therefore isolated from the framework interpreter. The CLI automatically registers valid scripts in `capabilities/` and event descriptors in `events/`.
+Workspace capability scripts are never imported by the pivot process. They use dedicated uv environments and JSON command protocols:
+
+```text
+think:   -l -> descriptor, -r -> full triple-quoted capability text
+measure: -l -> descriptor, -r <feature> -> measured JSON value
+work:    -l -> descriptor, -x + JSON stdin -> JSON execution result
+```
+
+Think descriptors are injected lazily. The model sees their names and summaries at first, then calls the built-in `pivot_read_think` tool only when it needs the full text. Work processes use a fixed workspace directory, a restricted environment, a timeout, and an output limit. This is process isolation intended to protect the pivot interpreter; deployments executing hostile commands should add an operating-system sandbox.
 
 Run the test suite with:
 

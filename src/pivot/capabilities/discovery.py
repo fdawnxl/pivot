@@ -1,88 +1,51 @@
-"""Best-effort loading of workspace capability metadata."""
+"""Isolated discovery of workspace capability scripts."""
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 from pathlib import Path
-from typing import Any
 
-from ..models import CapabilityDescriptor
-from .registry import CapabilityError, CapabilityRegistry, MeasureRunner
+from ..models import CapabilityKind
+from .registry import CapabilityError, CapabilityRegistry, CapabilityScriptRunner
 
 LOGGER = logging.getLogger(__name__)
 
 
-def discover_think_capabilities(root: str | Path) -> tuple[CapabilityDescriptor, ...]:
-    """Read ``DESCRIPTOR`` values from think capability Python files."""
+def register_workspace_capabilities(
+    workspace: str | Path,
+    registry: CapabilityRegistry,
+    environments: str | Path,
+    *,
+    timeout: float = 15.0,
+) -> None:
+    """Discover and register scripts without importing workspace code."""
 
-    directory = Path(root).expanduser()
-    if not directory.is_dir():
-        return ()
-    result: list[CapabilityDescriptor] = []
-    for script in sorted(directory.glob("*.py")):
-        try:
-            spec = importlib.util.spec_from_file_location(f"pivot_workspace_think_{script.stem}", script)
-            if spec is None or spec.loader is None:
-                raise ImportError("module spec unavailable")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            descriptor: Any = getattr(module, "DESCRIPTOR", None)
-            if isinstance(descriptor, CapabilityDescriptor) and descriptor.kind == "think":
-                result.append(descriptor)
-        except Exception as exc:
-            LOGGER.warning("Unable to load think capability %s: %s", script, exc)
-    return tuple(result)
-
-
-def _load_module(script: Path, prefix: str) -> Any:
-    spec = importlib.util.spec_from_file_location(f"{prefix}_{script.stem}", script)
-    if spec is None or spec.loader is None:
-        raise ImportError("module spec unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _descriptor(value: Any, kind: str, script: Path) -> CapabilityDescriptor:
-    if isinstance(value, CapabilityDescriptor):
-        descriptor = value
-    elif isinstance(value, dict):
-        descriptor = CapabilityDescriptor(
-            name=str(value["name"]),
-            kind=kind,  # type: ignore[arg-type]
-            description=str(value.get("description", "")),
-            parameters=dict(value.get("parameters", {})),
-        )
-    else:
-        raise CapabilityError("DESCRIPTOR has the wrong type")
-    if descriptor.kind != kind:
-        raise CapabilityError("DESCRIPTOR has the wrong capability kind")
-    return CapabilityDescriptor(descriptor.name, descriptor.kind, descriptor.description, descriptor.parameters, str(script))
-
-
-def register_workspace_capabilities(workspace: str | Path, registry: CapabilityRegistry, measure_environment: str | Path) -> None:
-    """Load valid think/work metadata and measure script adapters independently."""
-
-    root = Path(workspace).expanduser()
+    root = Path(workspace).expanduser().resolve()
+    environment_root = Path(environments).expanduser().resolve()
     loaded = 0
-    for kind in ("think", "work", "measure"):
+    for kind in ("think", "measure", "work"):
+        capability_kind: CapabilityKind = kind
+        runner = CapabilityScriptRunner(environment_root / kind, workspace=root, timeout=timeout)
         directory = root / "capabilities" / kind
         for script in sorted(directory.glob("*.py")):
             try:
-                module = _load_module(script, f"pivot_workspace_{kind}")
-                descriptor = _descriptor(getattr(module, "DESCRIPTOR", None), kind, script)
+                descriptor = runner.describe(script, capability_kind)
                 if kind == "think":
-                    registry.register(descriptor)
-                elif kind == "work":
-                    handler = getattr(module, "handle", None)
-                    if not callable(handler):
-                        raise CapabilityError("work script must expose callable handle")
-                    registry.register(descriptor, handler)
+                    registry.register_think(descriptor, lambda _script=script, _runner=runner: _runner.read_think(_script))
+                elif kind == "measure":
+                    registry.register(
+                        descriptor,
+                        lambda feature, _script=script, _runner=runner: _runner.read_measure(_script, feature),
+                    )
                 else:
-                    runner = MeasureRunner(measure_environment)
-                    registry.register(descriptor, lambda feature, _script=script, _runner=runner: _runner.read(_script, feature))
+                    registry.register(
+                        descriptor,
+                        lambda _script=script, _runner=runner, **arguments: _runner.execute_work(_script, arguments),
+                    )
                 loaded += 1
-            except Exception as exc:
+            except CapabilityError as exc:
                 LOGGER.warning("Unable to register %s capability %s: %s", kind, script, exc)
     LOGGER.info("Workspace capability discovery completed loaded=%d root=%s", loaded, root / "capabilities")
+
+
+__all__ = ["register_workspace_capabilities"]

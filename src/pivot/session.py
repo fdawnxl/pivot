@@ -88,7 +88,10 @@ class ConversationSession:
         context = {
             "capabilities": self.capabilities.prompt_context(),
             "events": event_context,
-            "instruction": "Use capabilities only when needed. Return concise user-facing text when work is complete.",
+            "instruction": (
+                "Think capabilities are lazy summaries. Call pivot_read_think to read a relevant think capability "
+                "before applying it. Use executable capabilities only when needed and return concise user-facing text."
+            ),
         }
         return Message(role="system", content="pivot runtime context:\n" + json.dumps(context, ensure_ascii=False, default=str))
 

@@ -45,7 +45,12 @@ def build_runtime(config: PivotConfig) -> Runtime:
 
     registry = CapabilityRegistry()
     environment_root = config.workspace_path / "environment"
-    register_workspace_capabilities(config.workspace_path, registry, environment_root / "measure")
+    register_workspace_capabilities(
+        config.workspace_path,
+        registry,
+        environment_root,
+        timeout=config.capability_timeout,
+    )
     event_pool = EventPool()
     event_runner = EventScriptRunner(str(environment_root / "event"))
     for event in load_event_scripts_isolated(str(config.workspace_path / "events"), event_runner):

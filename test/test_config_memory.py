@@ -26,6 +26,8 @@ def test_workspace_bootstrap_and_environment_precedence(tmp_path: Path, monkeypa
     assert config.max_rounds == 3
     assert (workspace / "capabilities/measure").is_dir()
     assert (workspace / "environment/measure/pyproject.toml").is_file()
+    assert (workspace / "environment/think/pyproject.toml").is_file()
+    assert (workspace / "environment/work/pyproject.toml").is_file()
     assert (workspace / "environment/event/pyproject.toml").is_file()
     assert (workspace / "logs/pivot.log").is_file()
 
