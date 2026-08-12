@@ -19,7 +19,7 @@ from textual.widgets import Button, Label, ListItem, ListView, LoadingIndicator,
 
 from .models import Message
 from .runtime import PivotClient
-from .session import CancellationToken, ConversationSession, SessionCancelled, SessionProgress
+from .session import CancellationToken, ConversationSession, SessionCancelled, SessionProgress, SessionState
 from .ui import safe_endpoint
 
 LOGGER = logging.getLogger(__name__)
@@ -182,19 +182,23 @@ class WorkflowView(Vertical):
 class SessionItem(ListItem):
     """Selectable session entry with a stable full UUID."""
 
-    def __init__(self, session_id: str, *, active: bool = False, working: bool = False) -> None:
+    def __init__(self, session_id: str, *, current: bool = False, state: SessionState = "ready") -> None:
         self.session_id = session_id
-        self.active = active
-        self.working = working
+        self.current = current
+        self.state = state
         super().__init__()
 
     def compose(self) -> ComposeResult:
         yield Label(self._label())
 
     def _label(self) -> str:
-        marker = "●" if self.working else "○"
-        active = "  ACTIVE" if self.active else ""
-        return f"{marker}  {self.session_id[:8]}{active}"
+        markers = {
+            "running": "[bold $success]●[/]",
+            "pending": "[bold $warning]●[/]",
+            "ready": "○",
+        }
+        current = "  CURRENT" if self.current else ""
+        return f"{markers[self.state]}  {self.session_id[:8]}{current}"
 
 class PivotApp(App[None]):
     """Modern multi-session terminal client for a pivot runtime."""
@@ -515,6 +519,8 @@ class PivotApp(App[None]):
         self.turns: dict[str, TurnState] = {}
         self.session_turns: dict[str, str] = {}
         self._quit_armed = False
+        self._session_refresh_pending = False
+        self._session_refresh_dirty = False
         self._session_ids = self._discover_session_ids()
 
     def compose(self) -> ComposeResult:
@@ -723,6 +729,8 @@ class PivotApp(App[None]):
         elif update.kind == "turn_completed":
             self._complete_model_step(turn, update.round_number or 1, "Response ready")
         self._refresh_workflow(turn)
+        if update.kind in {"turn_started", "event_wait_started", "event_completed"}:
+            self._schedule_session_refresh()
 
     def _finish_turn(self, turn_id: str, response: str | None, error: str | None, interrupted: bool = False) -> None:
         turn = self.turns.get(turn_id)
@@ -756,7 +764,24 @@ class PivotApp(App[None]):
             outcome = "interrupted" if interrupted else "failed" if error else "completed"
             self.notify(f"Conversation {turn.session_id[:8]} {outcome}.")
         self._update_header()
-        self.run_worker(self._refresh_session_list(), name="refresh-sessions", exclusive=True)
+        self._schedule_session_refresh()
+
+    def _schedule_session_refresh(self) -> None:
+        """Coalesce runtime state changes into one sidebar refresh worker."""
+
+        self._session_refresh_dirty = True
+        if self._session_refresh_pending:
+            return
+        self._session_refresh_pending = True
+        self.run_worker(self._drain_session_refreshes(), name="refresh-sessions")
+
+    async def _drain_session_refreshes(self) -> None:
+        try:
+            while self._session_refresh_dirty:
+                self._session_refresh_dirty = False
+                await self._refresh_session_list()
+        finally:
+            self._session_refresh_pending = False
 
     @staticmethod
     def _complete_step(turn: TurnState, name: str, state: str, detail: str) -> None:
@@ -828,16 +853,24 @@ class PivotApp(App[None]):
 
     async def _refresh_session_list(self) -> None:
         current_id = self.current_session.session_id
-        working = set(self.session_turns)
         known = list(self._session_ids)
         for session in self.runtime.sessions.sessions():
             if session.session_id not in known:
                 known.append(session.session_id)
+        sessions = {session_id: self.runtime.sessions.get(session_id) for session_id in known}
+        state_priority = {"running": 0, "pending": 1, "ready": 2}
+        known.sort(
+            key=lambda session_id: (
+                state_priority[sessions[session_id].state],
+                -sessions[session_id].last_active_at,
+                session_id,
+            )
+        )
         self._session_ids = known
         view = self.query_one("#session-list", ListView)
         await view.clear()
         await view.extend(
-            SessionItem(session_id, active=session_id == current_id, working=session_id in working)
+            SessionItem(session_id, current=session_id == current_id, state=sessions[session_id].state)
             for session_id in known
         )
         if current_id in known:

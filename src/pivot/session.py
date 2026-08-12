@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -74,6 +75,7 @@ class SessionProgress:
 
 
 ProgressCallback = Callable[[SessionProgress], None]
+SessionState = Literal["ready", "running", "pending"]
 
 
 def normalize_session_id(session_id: str) -> str:
@@ -109,7 +111,31 @@ class ConversationSession:
         self.event_service = event_service
         self.max_rounds = max_rounds
         self.history: list[Message] = []
+        self._state: SessionState = "ready"
+        self._last_active_at = time.time()
+        self._state_lock = threading.Lock()
+        self._run_lock = threading.Lock()
         self._restore()
+
+    @property
+    def state(self) -> SessionState:
+        """Return the current runtime lifecycle state."""
+
+        with self._state_lock:
+            return self._state
+
+    @property
+    def last_active_at(self) -> float:
+        """Return the wall-clock time of the latest runtime activity."""
+
+        with self._state_lock:
+            return self._last_active_at
+
+    def _set_state(self, state: SessionState) -> None:
+        with self._state_lock:
+            self._state = state
+            self._last_active_at = time.time()
+        LOGGER.debug("Session state changed session_id=%s state=%s", self.session_id, state)
 
     def _restore(self) -> None:
         """Restore valid JSON-lines history while isolating corrupt memory files."""
@@ -131,6 +157,10 @@ class ConversationSession:
                 restored.append(Message(value["role"], value.get("content"), value.get("name"), tuple(calls), value.get("tool_call_id")))
             self.history = restored
             if restored:
+                try:
+                    self._last_active_at = self.memory.path_for(self.session_id).stat().st_mtime
+                except OSError:
+                    LOGGER.debug("Unable to read session memory timestamp session_id=%s", self.session_id)
                 LOGGER.info("Session memory restored session_id=%s messages=%d", self.session_id, len(restored))
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             LOGGER.warning("Unable to restore session %s memory; starting a new context: %s", self.session_id, exc)
@@ -163,8 +193,17 @@ class ConversationSession:
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
     ) -> str:
-        with log_context(correlation_id=str(uuid4()), session_id=self.session_id):
-            return self._run_correlated(user_input, progress=progress, cancellation=cancellation)
+        if not user_input.strip():
+            raise ValueError("user_input must not be empty")
+        if not self._run_lock.acquire(blocking=False):
+            raise SessionError("Session is already running")
+        self._set_state("running")
+        try:
+            with log_context(correlation_id=str(uuid4()), session_id=self.session_id):
+                return self._run_correlated(user_input, progress=progress, cancellation=cancellation)
+        finally:
+            self._set_state("ready")
+            self._run_lock.release()
 
     def _run_correlated(
         self,
@@ -175,8 +214,6 @@ class ConversationSession:
     ) -> str:
         """Run one turn under the correlation context established by ``run``."""
 
-        if not user_input.strip():
-            raise ValueError("user_input must not be empty")
         self._raise_if_cancelled(cancellation, progress)
         if not self.history:
             self.history.append(self._context_message())
@@ -225,6 +262,7 @@ class ConversationSession:
                 self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
                 try:
                     if call.name == EVENT_WAIT_TOOL:
+                        self._set_state("pending")
                         self._emit_progress(
                             progress,
                             "event_wait_started",
@@ -233,13 +271,16 @@ class ConversationSession:
                             name=call.name,
                             result=call.arguments,
                         )
-                        result = self._wait_for_event(
-                            call,
-                            cancellation=cancellation,
-                            progress=progress,
-                            round_number=round_number,
-                            rollback_to=rollback_to,
-                        )
+                        try:
+                            result = self._wait_for_event(
+                                call,
+                                cancellation=cancellation,
+                                progress=progress,
+                                round_number=round_number,
+                                rollback_to=rollback_to,
+                            )
+                        finally:
+                            self._set_state("running")
                         self._emit_progress(
                             progress,
                             "event_completed",

@@ -58,6 +58,39 @@ def test_textual_cli_shortcut_bindings_exclude_f2_and_alt_navigation() -> None:
     assert "alt+down" not in bindings
 
 
+def test_session_item_renders_runtime_state_and_current_label() -> None:
+    assert "$success" not in SessionItem("12345678", state="ready")._label()
+    assert "$success" in SessionItem("12345678", state="running")._label()
+    assert "$warning" in SessionItem("12345678", state="pending")._label()
+    assert "CURRENT" in SessionItem("12345678", current=True)._label()
+    assert "ACTIVE" not in SessionItem("12345678", current=True)._label()
+
+
+@pytest.mark.asyncio
+async def test_textual_cli_sorts_sessions_by_state_then_recent_activity(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    ready_old = runtime.sessions.create()
+    pending = runtime.sessions.create()
+    running_old = runtime.sessions.create()
+    running_new = runtime.sessions.create()
+    ready_new = runtime.sessions.create()
+    pending._set_state("pending")
+    running_old._set_state("running")
+    running_new._set_state("running")
+    ready_new._set_state("ready")
+    app = PivotApp(PivotClient(runtime), ready_old)
+
+    async with app.run_test(size=(120, 36)):
+        items = list(app.query(SessionItem))
+        assert [item.session_id for item in items] == [
+            running_new.session_id,
+            running_old.session_id,
+            pending.session_id,
+            ready_new.session_id,
+            ready_old.session_id,
+        ]
+
+
 @pytest.mark.asyncio
 async def test_textual_cli_shortcut_bar_labels_and_clicks_common_actions(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)

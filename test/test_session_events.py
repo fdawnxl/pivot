@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 from uuid import uuid4
 
 import pytest
@@ -33,6 +34,32 @@ def test_session_executes_tools_and_persists(tmp_path: Path) -> None:
     assert "finished" in (tmp_path / session_id / "history.jsonl").read_text(encoding="utf-8")
     restored = ConversationSession(session_id, llm=FakeLLM(), capabilities=registry, memory=TextMemory(tmp_path), max_rounds=3)
     assert len(restored.history) == len(session.history)
+    assert restored.state == "ready"
+    assert restored.last_active_at == (tmp_path / session_id / "history.jsonl").stat().st_mtime
+
+
+def test_session_runtime_state_tracks_running_and_ready() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingLLM:
+        def complete(self, messages, *, tools=()):
+            started.set()
+            release.wait(timeout=2)
+            return {"choices": [{"message": {"content": "finished"}}]}
+
+    session = ConversationSession(str(uuid4()), llm=BlockingLLM(), capabilities=CapabilityRegistry())
+    initial_activity = session.last_active_at
+    thread = threading.Thread(target=session.run, args=("hello",))
+    thread.start()
+    assert started.wait(timeout=1)
+    assert session.state == "running"
+    assert session.last_active_at >= initial_activity
+
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert session.state == "ready"
 
 
 def test_session_emits_user_safe_progress_updates(tmp_path: Path) -> None:
@@ -188,6 +215,37 @@ def test_event_completion_is_injected_and_resumes_llm() -> None:
 
     assert response == "Temperature reached the requested threshold."
     assert "current value is 42" in llm.wake_message
+
+
+def test_session_runtime_state_is_pending_during_event_wait() -> None:
+    pool = EventPool()
+    pool.register(_temperature_event())
+    waiting = threading.Event()
+    release = threading.Event()
+
+    class BlockingSupervisor:
+        def poll_once(self):
+            waiting.set()
+            release.wait(timeout=2)
+            return pool.report_source("/event.py", {"temperature": 42})
+
+    service = EventService(pool, BlockingSupervisor(), poll_interval=0.01)  # type: ignore[arg-type]
+    session = ConversationSession(
+        str(uuid4()),
+        llm=EventLLM(),
+        capabilities=CapabilityRegistry(),
+        events=pool,
+        event_service=service,
+    )
+    thread = threading.Thread(target=session.run, args=("wait",))
+    thread.start()
+    assert waiting.wait(timeout=1)
+    assert session.state == "pending"
+
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert session.state == "ready"
 
 
 def test_event_service_returns_timeout_notification() -> None:
