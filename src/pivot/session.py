@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from .capabilities import CapabilityError, CapabilityRegistry
 from .events import EventPool
 from .llm import LLMClient
+from .logging import log_context
 from .memory import TextMemory
 from .models import Message, ToolCall
 from .parser import ResponseParseError, parse_response
@@ -98,6 +99,12 @@ class ConversationSession:
         self.memory.write(self.session_id, "\n".join(lines) + ("\n" if lines else ""))
 
     def run(self, user_input: str) -> str:
+        with log_context(correlation_id=str(uuid4()), session_id=self.session_id):
+            return self._run_correlated(user_input)
+
+    def _run_correlated(self, user_input: str) -> str:
+        """Run one turn under the correlation context established by ``run``."""
+
         if not user_input.strip():
             raise ValueError("user_input must not be empty")
         if not self.history:

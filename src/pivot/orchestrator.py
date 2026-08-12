@@ -5,9 +5,11 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import logging
+from uuid import uuid4
 from typing import Any
 
 from .session import ConversationSession
+from .logging import log_context
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +34,10 @@ class AgentOrchestrator:
         results: list[AgentResult] = []
         LOGGER.info("Agent orchestration started agents=%d", len(self.agents))
         with ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="pivot-agent") as pool:
-            futures = {pool.submit(agent.run, user_input): agent_id for agent_id, agent in self.agents.items()}
+            futures = {
+                pool.submit(self._run_agent, agent_id, agent, user_input): agent_id
+                for agent_id, agent in self.agents.items()
+            }
             for future in as_completed(futures):
                 agent_id = futures[future]
                 try:
@@ -43,3 +48,8 @@ class AgentOrchestrator:
         ordered = tuple(sorted(results, key=lambda item: item.agent_id))
         LOGGER.info("Agent orchestration completed agents=%d failures=%d", len(ordered), sum(item.error is not None for item in ordered))
         return ordered
+
+    @staticmethod
+    def _run_agent(agent_id: str, agent: ConversationSession, user_input: str) -> str:
+        with log_context(correlation_id=str(uuid4()), agent_id=agent_id, session_id=agent.session_id):
+            return agent.run(user_input)
