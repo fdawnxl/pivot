@@ -81,6 +81,7 @@ import asyncio
 import json
 import os
 
+from dbus_next import BusType
 from dbus_next.aio import MessageBus
 from dbus_next.service import ServiceInterface, method
 
@@ -109,7 +110,8 @@ class DependencyService(ServiceInterface):
 async def main() -> None:
     dependency_id = os.environ["PIVOT_DEPENDENCY_ID"]
     service_name = os.environ["PIVOT_DEPENDENCY_DBUS_SERVICE"]
-    bus = await MessageBus().connect()
+    bus_type = BusType.SESSION if os.environ["PIVOT_DEPENDENCY_DBUS_BUS"] == "session" else BusType.SYSTEM
+    bus = await MessageBus(bus_type=bus_type).connect()
     bus.export("/org/pivot/Dependency", DependencyService(dependency_id))
     await bus.request_name(service_name)
     await asyncio.Future()

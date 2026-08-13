@@ -7,12 +7,13 @@ import pytest
 from pivot.capabilities import CapabilityRegistry
 from pivot.config import PivotConfig
 from pivot.credentials import ProviderCredential
+from pivot.dependencies import DependencyState, DependencyStatus
 from pivot.events import EventPool, EventService, EventSupervisor
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, EventDescriptor
 from pivot.runtime import PivotClient, Runtime
 from pivot.session import SessionManager, SessionState
-from pivot.tui import PIVOT_THEME, ConversationMessage, PivotApp, PromptEditor, SessionItem, WorkflowView
+from pivot.tui import DependencyItem, PIVOT_THEME, ConversationMessage, PivotApp, PromptEditor, SessionItem, WorkflowView
 from pivot.ui import RuntimeSummary, render_banner, safe_endpoint
 
 
@@ -64,6 +65,63 @@ def test_session_item_renders_runtime_state_and_current_label() -> None:
     assert "$warning" in SessionItem("12345678", state=SessionState.PENDING)._label()
     assert "CURRENT" in SessionItem("12345678", current=True)._label()
     assert "ACTIVE" not in SessionItem("12345678", current=True)._label()
+
+
+def test_dependency_item_renders_lifecycle_state_colors() -> None:
+    labels = {
+        state: DependencyItem(DependencyStatus("sensor", state))._label()
+        for state in DependencyState
+    }
+    assert "$success" in labels[DependencyState.READY]
+    assert "√" in labels[DependencyState.READY]
+    assert all(
+        "$warning" in labels[state] and "⚪" in labels[state]
+        for state in (DependencyState.STARTING, DependencyState.DEGRADED, DependencyState.STOPPING)
+    )
+    assert all(
+        "$error" in labels[state] and "×" in labels[state]
+        for state in (DependencyState.STOPPED, DependencyState.ERROR)
+    )
+    assert all(f"[dim]{state.value}[/]" not in labels[state] for state in DependencyState)
+    assert all("\n" not in label for label in labels.values())
+
+
+@pytest.mark.asyncio
+async def test_textual_cli_displays_dependency_statuses_in_sidebar(tmp_path: Path) -> None:
+    class Dependencies:
+        refreshed = False
+
+        def descriptors(self):
+            return (object(), object())
+
+        def statuses(self, *, refresh: bool = False):
+            self.refreshed = self.refreshed or refresh
+            return (
+                DependencyStatus("sensor", DependencyState.READY, "available"),
+                DependencyStatus("camera", DependencyState.ERROR, "offline"),
+            )
+
+        def close(self) -> None:
+            pass
+
+    runtime = _runtime(tmp_path)
+    object.__setattr__(runtime, "dependencies", Dependencies())
+    app = PivotApp(PivotClient(runtime), runtime.sessions.create())
+
+    async with app.run_test(size=(90, 36)) as pilot:
+        await pilot.pause()
+        items = list(app.query(DependencyItem))
+        assert [item.status.dependency_id for item in items] == ["sensor", "camera"]
+        assert "$success" in items[0]._label()
+        assert "$error" in items[1]._label()
+        assert all(item.region.height == 1 for item in items)
+        dependencies = app.query_one("#dependencies")
+        assert dependencies.parent is app.query_one("#sessions-pane")
+        app._request_dependency_refresh()
+        await app.workers.wait_for_complete()
+        await app._refresh_dependency_list()
+        assert runtime.dependencies is not None
+        assert runtime.dependencies.refreshed  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

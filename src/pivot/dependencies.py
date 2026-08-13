@@ -281,7 +281,15 @@ def discover_dependencies(root: str | Path) -> tuple[DependencyDescriptor, ...]:
     duplicates = sorted(dependency_id for dependency_id, count in counts.items() if count > 1)
     for dependency_id in duplicates:
         LOGGER.warning("Skipping duplicate instance dependency id=%s", dependency_id)
-    return tuple(item for item in discovered if counts[item.dependency_id] == 1)
+    endpoints = Counter((item.dbus.bus, item.dbus.service) for item in discovered)
+    duplicate_endpoints = sorted(endpoint for endpoint, count in endpoints.items() if count > 1)
+    for bus, service in duplicate_endpoints:
+        LOGGER.warning("Skipping duplicate dependency D-Bus service bus=%s service=%s", bus, service)
+    return tuple(
+        item
+        for item in discovered
+        if counts[item.dependency_id] == 1 and endpoints[(item.dbus.bus, item.dbus.service)] == 1
+    )
 
 
 @dataclass(slots=True)
@@ -552,7 +560,15 @@ class DependencyManager:
             for dependency_id in tuple(item.dependency_id for item in self.descriptors()):
                 with self._lock:
                     running = self._running.get(dependency_id)
-                if running is None or running.process.poll() is not None:
+                if running is None:
+                    continue
+                return_code = running.process.poll()
+                if return_code is not None:
+                    self._set_status(
+                        dependency_id,
+                        DependencyState.ERROR,
+                        f"Process exited with code {return_code}",
+                    )
                     continue
                 try:
                     self.query_status(dependency_id)

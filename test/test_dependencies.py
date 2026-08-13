@@ -66,6 +66,8 @@ def test_dependency_discovery_is_first_level_and_skips_invalid_or_duplicate_proj
     first = _write_project(root / "first", "shared", "org.pivot.SharedOne")
     _write_project(root / "duplicate", "shared", "org.pivot.SharedTwo")
     valid = _write_project(root / "valid", "valid", "org.pivot.Valid")
+    _write_project(root / "service-one", "service-one", "org.pivot.Conflict")
+    _write_project(root / "service-two", "service-two", "org.pivot.Conflict")
     invalid = root / "invalid"
     invalid.mkdir(parents=True)
     (invalid / "dependency.toml").write_text('id = "invalid"\ncommand = "python server.py"\n', encoding="utf-8")
@@ -75,6 +77,7 @@ def test_dependency_discovery_is_first_level_and_skips_invalid_or_duplicate_proj
 
     assert [(item.dependency_id, item.root) for item in descriptors] == [("valid", valid.resolve())]
     assert "Skipping duplicate instance dependency" in caplog.text
+    assert "Skipping duplicate dependency D-Bus service" in caplog.text
     assert "Skipping instance dependency" in caplog.text
 
 
@@ -160,6 +163,13 @@ def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(tmp_path
     assert status_client.pings == [("org.pivot.SensorServer", 0.25)]
     assert status_client.queries == [("org.pivot.SensorServer", 0.25)]
     assert manager.statuses() == first
+    processes[0].returncode = 7
+    assert manager.statuses(refresh=True)[0] == DependencyStatus(
+        "sensor-server",
+        DependencyState.ERROR,
+        "Process exited with code 7",
+    )
+    processes[0].returncode = None
 
     assert manager.stop("sensor-server")
     assert processes[0].terminated

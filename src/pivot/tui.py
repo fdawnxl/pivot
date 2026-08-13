@@ -17,6 +17,7 @@ from textual.message import Message as TextualMessage
 from textual.theme import Theme
 from textual.widgets import Button, Label, ListItem, ListView, LoadingIndicator, Markdown, Static, TextArea
 
+from .dependencies import DependencyState, DependencyStatus
 from .models import Message
 from .runtime import PivotClient
 from .session import CancellationToken, ConversationSession, SessionCancelled, SessionProgress, SessionState
@@ -206,6 +207,25 @@ class SessionItem(ListItem):
         current = "  CURRENT" if self.current else ""
         return f"{markers[self.state]}  {self.session_id[:8]}{current}"
 
+
+class DependencyItem(Static):
+    """One dependency lifecycle snapshot rendered for quick scanning."""
+
+    def __init__(self, status: DependencyStatus) -> None:
+        self.status = status
+        super().__init__(self._label(), classes="dependency-item")
+
+    def _label(self) -> str:
+        markers = {
+            DependencyState.READY: "[bold $success]√[/]",
+            DependencyState.STARTING: "[bold $warning]⚪[/]",
+            DependencyState.DEGRADED: "[bold $warning]⚪[/]",
+            DependencyState.STOPPING: "[bold $warning]⚪[/]",
+            DependencyState.STOPPED: "[bold $error]×[/]",
+            DependencyState.ERROR: "[bold $error]×[/]",
+        }
+        return f"{markers[self.status.state]}  {escape(self.status.dependency_id)}"
+
 class PivotApp(App[None]):
     """Modern multi-session terminal client for a pivot runtime."""
 
@@ -272,6 +292,35 @@ class PivotApp(App[None]):
         height: 1fr;
         background: transparent;
         border: none;
+    }
+
+    #dependencies {
+        height: auto;
+        max-height: 10;
+        margin-top: 1;
+        border-top: solid $border-blurred;
+        padding-top: 1;
+    }
+
+    #dependency-list {
+        height: auto;
+        max-height: 7;
+        overflow-y: auto;
+    }
+
+    .dependency-item {
+        width: 100%;
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        color: $text-muted;
+        text-overflow: ellipsis;
+    }
+
+    #dependency-empty {
+        height: 2;
+        padding: 0 1;
+        color: $text-muted;
     }
 
     SessionItem {
@@ -539,6 +588,9 @@ class PivotApp(App[None]):
                 yield Label("SESSIONS", classes="section-title")
                 yield ListView(id="session-list")
                 yield Button("New session", id="new-session")
+                with Vertical(id="dependencies"):
+                    yield Label("DEPENDENCIES", classes="section-title")
+                    yield VerticalScroll(id="dependency-list")
             with Vertical(id="main-pane"):
                 with Horizontal(id="conversation-header"):
                     yield Static("Conversation", id="conversation-title")
@@ -567,6 +619,9 @@ class PivotApp(App[None]):
         self.set_class(compact, "compact")
         self.query_one("#body").set_class(compact, "sessions-hidden")
         await self._refresh_session_list()
+        await self._refresh_dependency_list()
+        if self.runtime.dependencies is not None and self.runtime.dependencies.descriptors():
+            self.set_interval(5.0, self._request_dependency_refresh)
         await self._show_session(self.current_session)
         self.query_one("#prompt", PromptEditor).focus()
 
@@ -885,6 +940,30 @@ class PivotApp(App[None]):
         )
         if current_id in known:
             view.index = known.index(current_id)
+
+    async def _refresh_dependency_list(self) -> None:
+        view = self.query_one("#dependency-list", VerticalScroll)
+        await view.remove_children()
+        manager = self.runtime.dependencies
+        statuses = manager.statuses() if manager is not None else ()
+        if statuses:
+            await view.mount(*(DependencyItem(status) for status in statuses))
+        else:
+            await view.mount(Static("No dependencies", id="dependency-empty", markup=False))
+
+    def _request_dependency_refresh(self) -> None:
+        self._refresh_dependencies()
+
+    @work(thread=True, exclusive=True, group="dependency-status", exit_on_error=False)
+    def _refresh_dependencies(self) -> None:
+        manager = self.runtime.dependencies
+        if manager is None:
+            return
+        manager.statuses(refresh=True)
+        try:
+            self.call_from_thread(self._refresh_dependency_list)
+        except RuntimeError:
+            LOGGER.debug("TUI closed before dependency status delivery")
 
     def _discover_session_ids(self) -> list[str]:
         current_id = self.current_session.session_id

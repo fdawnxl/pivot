@@ -20,7 +20,7 @@ Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+N` for a new c
 PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot --session 4b3c9f24-582c-42b1-bf25-f24a6f907f67
 ```
 
-The TUI shows the selected provider, model, conversation, capabilities, and events without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
+The TUI shows the selected provider, model, conversation, capabilities, events, and live dependency health without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
 The repository also contains a local example instance at `.tmp/instance`. It is ignored by git and can be used immediately:
 
