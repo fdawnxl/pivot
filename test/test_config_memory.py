@@ -8,33 +8,33 @@ from pivot.credentials import CredentialStore, ProviderCredential
 from pivot.memory import TextMemory
 
 
-def test_workspace_bootstrap_and_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    (workspace / "config.toml").parent.mkdir()
-    (workspace / "config.toml").write_text('provider = "file-provider"\nmax_rounds = 3\n', encoding="utf-8")
-    CredentialStore(workspace / "credentials.toml").save(
+def test_instance_bootstrap_and_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    instance = tmp_path / "instance"
+    (instance / "config.toml").parent.mkdir()
+    (instance / "config.toml").write_text('provider = "file-provider"\nmax_rounds = 3\n', encoding="utf-8")
+    CredentialStore(instance / "credentials.toml").save(
         {
             "file-provider": ProviderCredential("file-provider", "file-model"),
             "env-provider": ProviderCredential("env-provider", "env-model", "https://example.test/v1", "secret"),
         }
     )
     monkeypatch.setenv("PIVOT_PROVIDER", "env-provider")
-    config = PivotConfig.load(workspace_path=workspace)
+    config = PivotConfig.load(instance_path=instance)
     assert config.provider.name == "env-provider"
     assert config.provider.model == "env-model"
     assert config.provider.api_key == "secret"
     assert config.max_rounds == 3
-    assert (workspace / "capabilities/measure").is_dir()
-    assert (workspace / "environment/measure/pyproject.toml").is_file()
-    assert (workspace / "environment/think/pyproject.toml").is_file()
-    assert (workspace / "environment/work/pyproject.toml").is_file()
-    assert (workspace / "environment/event/pyproject.toml").is_file()
-    assert (workspace / "dependencies").is_dir()
-    assert (workspace / "logs/pivot.log").is_file()
+    assert (instance / "capabilities/measure").is_dir()
+    assert (instance / "environment/measure/pyproject.toml").is_file()
+    assert (instance / "environment/think/pyproject.toml").is_file()
+    assert (instance / "environment/work/pyproject.toml").is_file()
+    assert (instance / "environment/event/pyproject.toml").is_file()
+    assert (instance / "dependencies").is_dir()
+    assert (instance / "logs/pivot.log").is_file()
 
 
-def test_workspace_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PIVOT_WORKSPACE_PATH", raising=False)
+def test_instance_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PIVOT_INSTANCE_PATH", raising=False)
     with pytest.raises(ConfigurationError):
         PivotConfig.load()
 
@@ -44,11 +44,11 @@ def test_codex_files_are_not_runtime_inputs(tmp_path: Path, monkeypatch: pytest.
     codex_home.mkdir(parents=True)
     (codex_home / "config.toml").write_text('model = "codex-only-model"\n', encoding="utf-8")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "config.toml").write_text('provider = "local"\n', encoding="utf-8")
-    CredentialStore(workspace / "credentials.toml").save({"local": ProviderCredential("local", "local-model")})
-    config = PivotConfig.load(workspace_path=workspace)
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text('provider = "local"\n', encoding="utf-8")
+    CredentialStore(instance / "credentials.toml").save({"local": ProviderCredential("local", "local-model")})
+    config = PivotConfig.load(instance_path=instance)
     assert config.provider.model == "local-model"
 
 
@@ -63,36 +63,36 @@ def test_memory_uses_uuid_session_directories(tmp_path: Path) -> None:
         memory.read("robot/one")
 
 
-def test_workspace_credentials_are_restricted(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "config.toml").write_text('provider = "local"\n', encoding="utf-8")
-    CredentialStore(workspace / "credentials.toml").save(
+def test_instance_credentials_are_restricted(tmp_path: Path) -> None:
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text('provider = "local"\n', encoding="utf-8")
+    CredentialStore(instance / "credentials.toml").save(
         {
             "local": ProviderCredential("local", "local-model", "https://example.invalid/v1", "test-secret"),
             "backup": ProviderCredential("backup", "backup-model"),
         }
     )
-    config = PivotConfig.load(workspace_path=workspace)
+    config = PivotConfig.load(instance_path=instance)
     assert config.provider.model == "local-model"
     assert config.provider.api_base == "https://example.invalid/v1"
     assert config.provider.api_key == "test-secret"
-    assert (workspace / "credentials.toml").stat().st_mode & 0o777 == 0o600
-    assert "test-secret" not in (workspace / "config.toml").read_text(encoding="utf-8")
+    assert (instance / "credentials.toml").stat().st_mode & 0o777 == 0o600
+    assert "test-secret" not in (instance / "config.toml").read_text(encoding="utf-8")
 
 
 def test_selected_provider_must_exist(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "config.toml").write_text('provider = "missing"\n', encoding="utf-8")
-    CredentialStore(workspace / "credentials.toml").save({"local": ProviderCredential("local", "model")})
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text('provider = "missing"\n', encoding="utf-8")
+    CredentialStore(instance / "credentials.toml").save({"local": ProviderCredential("local", "model")})
     with pytest.raises(ConfigurationError, match="not defined"):
-        PivotConfig.load(workspace_path=workspace)
+        PivotConfig.load(instance_path=instance)
 
 
-def test_missing_provider_still_bootstraps_empty_workspace(tmp_path: Path) -> None:
-    workspace = tmp_path / "new-workspace"
+def test_missing_provider_still_bootstraps_empty_instance(tmp_path: Path) -> None:
+    instance = tmp_path / "new-instance"
     with pytest.raises(ConfigurationError, match="provider is required"):
-        PivotConfig.load(workspace_path=workspace)
-    assert (workspace / "config.toml").is_file()
-    assert (workspace / "environment/work/pyproject.toml").is_file()
+        PivotConfig.load(instance_path=instance)
+    assert (instance / "config.toml").is_file()
+    assert (instance / "environment/work/pyproject.toml").is_file()

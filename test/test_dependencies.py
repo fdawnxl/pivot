@@ -63,8 +63,8 @@ def test_dependency_discovery_is_first_level_and_skips_invalid_or_duplicate_proj
     descriptors = discover_dependencies(root)
 
     assert [(item.dependency_id, item.root) for item in descriptors] == [("com.pivot.valid", valid.resolve())]
-    assert "Skipping duplicate workspace dependency" in caplog.text
-    assert "Skipping workspace dependency" in caplog.text
+    assert "Skipping duplicate instance dependency" in caplog.text
+    assert "Skipping instance dependency" in caplog.text
 
 
 class FakeStatusClient:
@@ -104,8 +104,8 @@ class FakeProcess:
 
 
 def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    project = _write_project(workspace / "dependencies" / "sensor")
+    instance = tmp_path / "instance"
+    project = _write_project(instance / "dependencies" / "sensor")
     sync_calls: list[tuple[list[str], dict[str, Any]]] = []
     launch_calls: list[tuple[list[str], dict[str, Any]]] = []
     processes: list[FakeProcess] = []
@@ -122,7 +122,7 @@ def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(tmp_path
 
     status_client = FakeStatusClient()
     manager = DependencyManager(
-        workspace,
+        instance,
         status_client=status_client,
         runner=runner,
         process_factory=process_factory,
@@ -156,8 +156,8 @@ def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(tmp_path
 
 
 def test_failed_sync_does_not_create_first_run_marker_or_launch(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    project = _write_project(workspace / "dependencies" / "sensor")
+    instance = tmp_path / "instance"
+    project = _write_project(instance / "dependencies" / "sensor")
     launched = False
 
     def runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -169,7 +169,7 @@ def test_failed_sync_does_not_create_first_run_marker_or_launch(tmp_path: Path) 
         return FakeProcess(1)
 
     manager = DependencyManager(
-        workspace,
+        instance,
         status_client=FakeStatusClient(),
         runner=runner,
         process_factory=process_factory,
@@ -184,9 +184,9 @@ def test_failed_sync_does_not_create_first_run_marker_or_launch(tmp_path: Path) 
 
 
 def test_start_all_isolates_one_dependency_installation_failure(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    _write_project(workspace / "dependencies" / "broken", "com.pivot.broken")
-    _write_project(workspace / "dependencies" / "healthy", "com.pivot.healthy")
+    instance = tmp_path / "instance"
+    _write_project(instance / "dependencies" / "broken", "com.pivot.broken")
+    _write_project(instance / "dependencies" / "healthy", "com.pivot.healthy")
     launched: list[str] = []
 
     def runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -200,7 +200,7 @@ def test_start_all_isolates_one_dependency_installation_failure(tmp_path: Path) 
 
     status_client = FakeStatusClient()
     manager = DependencyManager(
-        workspace,
+        instance,
         status_client=status_client,
         runner=runner,
         process_factory=process_factory,

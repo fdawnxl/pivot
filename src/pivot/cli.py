@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pivot", description="Run a pivot agent conversation")
-    parser.add_argument("--workspace", help="Path to the pivot workspace (or set PIVOT_WORKSPACE_PATH)")
+    parser.add_argument("--instance", help="Path to the pivot instance (or set PIVOT_INSTANCE_PATH)")
     parser.add_argument("--session", help="Conversation UUID to resume; omitted creates a new conversation")
     parser.add_argument("--no-banner", action="store_true", help="Suppress the startup logo and runtime summary")
     parser.add_argument("message", nargs="?", help="One user message; omit for interactive mode or stdin")
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging("INFO")
     client: PivotClient | None = None
     try:
-        client = PivotClient(build_runtime(PivotConfig.load(workspace_path=args.workspace)))
+        client = PivotClient(build_runtime(PivotConfig.load(instance_path=args.instance)))
         runtime = client.runtime
         session = runtime.sessions.get(args.session) if args.session else runtime.sessions.create()
         if args.message is None and sys.stdin.isatty():

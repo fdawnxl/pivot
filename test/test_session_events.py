@@ -170,7 +170,7 @@ def test_isolated_event_runner_discovers_generic_source(tmp_path: Path) -> None:
 
 
 def test_event_runner_rejects_missing_source(tmp_path: Path) -> None:
-    runner = EventScriptRunner(tmp_path / "environment", workspace=tmp_path)
+    runner = EventScriptRunner(tmp_path / "environment", instance=tmp_path)
     try:
         runner.poll(tmp_path / "missing.py")
     except EventError as exc:
@@ -193,7 +193,7 @@ def test_event_runner_preserves_dbus_addresses(tmp_path: Path, monkeypatch: pyte
     )
     monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/pivot-test-bus")
 
-    assert EventScriptRunner(environment, workspace=tmp_path).poll(script) == {
+    assert EventScriptRunner(environment, instance=tmp_path).poll(script) == {
         "address": "unix:path=/tmp/pivot-test-bus"
     }
 

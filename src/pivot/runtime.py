@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from .capabilities import CapabilityRegistry
-from .capabilities.discovery import register_workspace_capabilities
+from .capabilities.discovery import register_instance_capabilities
 from .config import PivotConfig
 from .dependencies import DependencyManager
 from .events import EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
@@ -39,7 +39,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
     """Build capability, event, LLM, memory, and session services."""
 
     dependencies = DependencyManager(
-        config.workspace_path,
+        config.instance_path,
         install_timeout=config.dependency_install_timeout,
         start_timeout=config.dependency_start_timeout,
         dbus_timeout=config.dependency_dbus_timeout,
@@ -48,9 +48,9 @@ def build_runtime(config: PivotConfig) -> Runtime:
     try:
         dependencies.start_all()
         registry = CapabilityRegistry()
-        environment_root = config.workspace_path / "environment"
-        register_workspace_capabilities(
-            config.workspace_path,
+        environment_root = config.instance_path / "environment"
+        register_instance_capabilities(
+            config.instance_path,
             registry,
             environment_root,
             timeout=config.capability_timeout,
@@ -58,14 +58,14 @@ def build_runtime(config: PivotConfig) -> Runtime:
         event_pool = EventPool()
         event_runner = EventScriptRunner(
             environment_root / "event",
-            workspace=config.workspace_path,
+            instance=config.instance_path,
             timeout=config.capability_timeout,
         )
-        for event in load_event_scripts_isolated(str(config.workspace_path / "events"), event_runner):
+        for event in load_event_scripts_isolated(str(config.instance_path / "events"), event_runner):
             try:
                 event_pool.register(event)
             except Exception as exc:
-                LOGGER.warning("Unable to register workspace event %s: %s", event.name, exc)
+                LOGGER.warning("Unable to register instance event %s: %s", event.name, exc)
         event_service = EventService(
             event_pool,
             EventSupervisor(event_pool, event_runner),
@@ -80,7 +80,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
                 timeout=config.llm_timeout,
             ),
             capabilities=registry,
-            memory=TextMemory(config.workspace_path / "memory"),
+            memory=TextMemory(config.instance_path / "memory"),
             events=event_pool,
             event_service=event_service,
             max_rounds=config.max_rounds,
@@ -104,10 +104,10 @@ class PivotClient:
         self.runtime = runtime
 
     @classmethod
-    def open(cls, *, workspace_path: str | None = None) -> "PivotClient":
+    def open(cls, *, instance_path: str | None = None) -> "PivotClient":
         """Load configuration and create a reusable pivot client."""
 
-        return cls(build_runtime(PivotConfig.load(workspace_path=workspace_path)))
+        return cls(build_runtime(PivotConfig.load(instance_path=instance_path)))
 
     def create_session(self) -> ConversationSession:
         """Create a new isolated conversation."""

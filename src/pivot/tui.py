@@ -182,7 +182,13 @@ class WorkflowView(Vertical):
 class SessionItem(ListItem):
     """Selectable session entry with a stable full UUID."""
 
-    def __init__(self, session_id: str, *, current: bool = False, state: SessionState = "ready") -> None:
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        current: bool = False,
+        state: SessionState = SessionState.READY,
+    ) -> None:
         self.session_id = session_id
         self.current = current
         self.state = state
@@ -193,9 +199,9 @@ class SessionItem(ListItem):
 
     def _label(self) -> str:
         markers = {
-            "running": "[bold $success]●[/]",
-            "pending": "[bold $warning]●[/]",
-            "ready": "○",
+            SessionState.RUNNING: "[bold $success]●[/]",
+            SessionState.PENDING: "[bold $warning]●[/]",
+            SessionState.READY: "○",
         }
         current = "  CURRENT" if self.current else ""
         return f"{markers[self.state]}  {self.session_id[:8]}{current}"
@@ -858,7 +864,11 @@ class PivotApp(App[None]):
             if session.session_id not in known:
                 known.append(session.session_id)
         sessions = {session_id: self.runtime.sessions.get(session_id) for session_id in known}
-        state_priority = {"running": 0, "pending": 1, "ready": 2}
+        state_priority = {
+            SessionState.RUNNING: 0,
+            SessionState.PENDING: 1,
+            SessionState.READY: 2,
+        }
         known.sort(
             key=lambda session_id: (
                 state_priority[sessions[session_id].state],
@@ -880,7 +890,7 @@ class PivotApp(App[None]):
         current_id = self.current_session.session_id
         managed = [session.session_id for session in self.runtime.sessions.sessions()]
         persisted: list[tuple[float, str]] = []
-        memory_root = self.runtime.config.workspace_path / "memory"
+        memory_root = self.runtime.config.instance_path / "memory"
         if memory_root.is_dir():
             try:
                 paths = tuple(memory_root.iterdir())

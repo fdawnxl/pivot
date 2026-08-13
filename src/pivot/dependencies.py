@@ -48,7 +48,7 @@ DependencyHealth = Literal["starting", "ready", "degraded", "stopping", "error"]
 
 @dataclass(frozen=True, slots=True)
 class DependencyDescriptor:
-    """Validated metadata for one workspace dependency project."""
+    """Validated metadata for one instance dependency project."""
 
     dependency_id: str
     root: Path
@@ -220,7 +220,7 @@ def load_dependency_manifest(root: str | Path) -> DependencyDescriptor:
 
 
 def discover_dependencies(root: str | Path) -> tuple[DependencyDescriptor, ...]:
-    """Discover valid dependency projects from first-level workspace directories."""
+    """Discover valid dependency projects from first-level instance directories."""
 
     dependencies_root = Path(root).expanduser().resolve()
     if not dependencies_root.is_dir():
@@ -236,11 +236,11 @@ def discover_dependencies(root: str | Path) -> tuple[DependencyDescriptor, ...]:
             project.resolve().relative_to(dependencies_root)
             discovered.append(load_dependency_manifest(project))
         except (DependencyError, ValueError) as exc:
-            LOGGER.warning("Skipping workspace dependency directory=%s error=%s", project.name, exc)
+            LOGGER.warning("Skipping instance dependency directory=%s error=%s", project.name, exc)
     counts = Counter(item.dependency_id for item in discovered)
     duplicates = sorted(dependency_id for dependency_id, count in counts.items() if count > 1)
     for dependency_id in duplicates:
-        LOGGER.warning("Skipping duplicate workspace dependency id=%s", dependency_id)
+        LOGGER.warning("Skipping duplicate instance dependency id=%s", dependency_id)
     return tuple(item for item in discovered if counts[item.dependency_id] == 1)
 
 
@@ -252,11 +252,11 @@ class _RunningDependency:
 
 
 class DependencyManager:
-    """Install, launch, inspect, and stop isolated workspace dependencies."""
+    """Install, launch, inspect, and stop isolated instance dependencies."""
 
     def __init__(
         self,
-        workspace: str | Path,
+        instance: str | Path,
         *,
         status_client: DependencyStatusClient | None = None,
         uv_binary: str = "uv",
@@ -272,8 +272,8 @@ class DependencyManager:
     ) -> None:
         if min(install_timeout, start_timeout, dbus_timeout, stop_timeout, poll_interval) <= 0:
             raise ValueError("Dependency timeouts and poll interval must be greater than zero")
-        self.workspace = Path(workspace).expanduser().resolve()
-        self.root = self.workspace / "dependencies"
+        self.instance = Path(instance).expanduser().resolve()
+        self.root = self.instance / "dependencies"
         self.status_client = status_client or DBusDependencyStatusClient()
         self.uv_binary = uv_binary
         self.install_timeout = install_timeout
@@ -296,7 +296,7 @@ class DependencyManager:
         descriptors = discover_dependencies(self.root)
         with self._lock:
             self._descriptors = {item.dependency_id: item for item in descriptors}
-        LOGGER.info("Workspace dependency discovery completed loaded=%d root=%s", len(descriptors), self.root)
+        LOGGER.info("Instance dependency discovery completed loaded=%d root=%s", len(descriptors), self.root)
         return descriptors
 
     def start_all(self) -> tuple[DependencyStatus, ...]:
@@ -330,9 +330,9 @@ class DependencyManager:
             self.scan()
             descriptor = self._descriptors.get(dependency_id)
         if descriptor is None:
-            raise DependencyError(f"Unknown workspace dependency: {dependency_id}")
+            raise DependencyError(f"Unknown instance dependency: {dependency_id}")
         self._install_once(descriptor)
-        log_path = self.workspace / "logs" / "dependencies" / f"{dependency_id}.log"
+        log_path = self.instance / "logs" / "dependencies" / f"{dependency_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             log_handle = log_path.open("ab", buffering=0)
@@ -402,7 +402,7 @@ class DependencyManager:
 
     def _environment(self, dependency_id: str) -> dict[str, str]:
         environment = {key: value for key, value in os.environ.items() if key in _ENVIRONMENT_KEYS}
-        environment["PIVOT_WORKSPACE_PATH"] = str(self.workspace)
+        environment["PIVOT_INSTANCE_PATH"] = str(self.instance)
         environment["PIVOT_DEPENDENCY_ID"] = dependency_id
         return environment
 

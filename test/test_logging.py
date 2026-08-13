@@ -82,22 +82,22 @@ def test_tui_logging_preserves_file_without_console_output(tmp_path: Path) -> No
 
 
 def test_logging_level_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "config.toml").write_text(
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text(
         'provider = "test"\n[logging]\nlog_console_level = "error"\nlog_file_level = "info"\n', encoding="utf-8"
     )
-    CredentialStore(workspace / "credentials.toml").save({"test": ProviderCredential("test", "model")})
+    CredentialStore(instance / "credentials.toml").save({"test": ProviderCredential("test", "model")})
     monkeypatch.setenv("PIVOT_LOG_STORAGE_LEVEL", "debug")
-    config = PivotConfig.load(workspace_path=workspace)
+    config = PivotConfig.load(instance_path=instance)
     assert config.log_console_level == "ERROR"
     assert config.log_file_level == "DEBUG"
 
 
 def test_invalid_logging_level_is_rejected(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "config.toml").write_text('provider = "test"\n[logging]\ndisplay_level = "verbose"\n', encoding="utf-8")
-    CredentialStore(workspace / "credentials.toml").save({"test": ProviderCredential("test", "model")})
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text('provider = "test"\n[logging]\ndisplay_level = "verbose"\n', encoding="utf-8")
+    CredentialStore(instance / "credentials.toml").save({"test": ProviderCredential("test", "model")})
     with pytest.raises(ConfigurationError):
-        PivotConfig.load(workspace_path=workspace)
+        PivotConfig.load(instance_path=instance)

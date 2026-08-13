@@ -1,4 +1,4 @@
-"""Configuration loading and workspace initialization."""
+"""Configuration loading and instance initialization."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _validate_log_level(value: str, *, setting: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class PivotConfig:
-    workspace_path: Path
+    instance_path: Path
     provider: ProviderCredential
     max_rounds: int = 8
     llm_timeout: float = 120.0
@@ -43,15 +43,15 @@ class PivotConfig:
     log_file_level: str = "DEBUG"
 
     @classmethod
-    def load(cls, *, workspace_path: str | Path | None = None, config_path: str | Path | None = None) -> "PivotConfig":
-        """Load config with env > TOML > defaults, then initialize workspace."""
+    def load(cls, *, instance_path: str | Path | None = None, config_path: str | Path | None = None) -> "PivotConfig":
+        """Load config with env > TOML > defaults, then initialize instance."""
 
-        explicit_workspace = workspace_path or os.getenv("PIVOT_WORKSPACE_PATH")
-        if not explicit_workspace:
-            raise ConfigurationError("PIVOT_WORKSPACE_PATH or --workspace is required")
-        workspace = Path(explicit_workspace).expanduser().resolve()
-        _ensure_workspace(workspace)
-        toml_file = Path(config_path).expanduser() if config_path else workspace / "config.toml"
+        explicit_instance = instance_path or os.getenv("PIVOT_INSTANCE_PATH")
+        if not explicit_instance:
+            raise ConfigurationError("PIVOT_INSTANCE_PATH or --instance is required")
+        instance = Path(explicit_instance).expanduser().resolve()
+        _ensure_instance(instance)
+        toml_file = Path(config_path).expanduser() if config_path else instance / "config.toml"
         values: dict[str, Any] = {}
         if toml_file.is_file():
             try:
@@ -63,7 +63,7 @@ class PivotConfig:
 
         logging_values = values.get("logging", {}) if isinstance(values.get("logging", {}), dict) else {}
         merged: dict[str, Any] = {**values, **logging_values}
-        providers = CredentialStore(workspace / "credentials.toml").read()
+        providers = CredentialStore(instance / "credentials.toml").read()
 
         def get(name: str, default: Any, cast: Any = str) -> Any:
             env_name = f"PIVOT_{name.upper()}"
@@ -89,7 +89,7 @@ class PivotConfig:
         if provider is None:
             raise ConfigurationError(f"Provider {provider_name!r} is not defined in credentials.toml")
         config = cls(
-            workspace_path=workspace,
+            instance_path=instance,
             provider=provider,
             max_rounds=get("max_rounds", 8, int),
             llm_timeout=get("llm_timeout", 120.0, float),
@@ -115,13 +115,13 @@ class PivotConfig:
             or config.dependency_stop_timeout <= 0
         ):
             raise ConfigurationError("max_rounds and timeouts must be greater than zero")
-        config.ensure_workspace()
+        config.ensure_instance()
         configure_logging(
             config.log_console_level,
             file_level=config.log_file_level,
-            log_path=config.workspace_path / "logs" / "pivot.log",
+            log_path=config.instance_path / "logs" / "pivot.log",
         )
-        LOGGER.info("Workspace initialized path=%s", config.workspace_path)
+        LOGGER.info("Instance initialized path=%s", config.instance_path)
         LOGGER.debug(
             "Configuration loaded model=%s provider=%s api_base_configured=%s max_rounds=%d llm_timeout=%g",
             config.provider.model,
@@ -132,14 +132,14 @@ class PivotConfig:
         )
         return config
 
-    def ensure_workspace(self) -> None:
-        """Create the documented workspace directories without overwriting user files."""
+    def ensure_instance(self) -> None:
+        """Create the documented instance directories without overwriting user files."""
 
-        _ensure_workspace(self.workspace_path)
+        _ensure_instance(self.instance_path)
 
 
-def _ensure_workspace(workspace_path: Path) -> None:
-    """Bootstrap workspace files before provider validation can fail."""
+def _ensure_instance(instance_path: Path) -> None:
+    """Bootstrap instance files before provider validation can fail."""
 
     for relative in (
             "capabilities/think",
@@ -154,14 +154,14 @@ def _ensure_workspace(workspace_path: Path) -> None:
             "environment/work",
             "environment/event",
         ):
-        (workspace_path / relative).mkdir(parents=True, exist_ok=True)
+        (instance_path / relative).mkdir(parents=True, exist_ok=True)
     for kind in ("think", "measure", "work", "event"):
-        project = workspace_path / "environment" / kind / "pyproject.toml"
+        project = instance_path / "environment" / kind / "pyproject.toml"
         if not project.exists():
             project.write_text(
                 f'[project]\nname = "pivot-{kind}-environment"\nversion = "0.1.0"\nrequires-python = ">=3.11"\ndependencies = []\n',
                 encoding="utf-8",
             )
-    config_file = workspace_path / "config.toml"
+    config_file = instance_path / "config.toml"
     if not config_file.exists():
-        config_file.write_text("# pivot workspace configuration\n# provider = \"provider-name\"\n", encoding="utf-8")
+        config_file.write_text("# pivot instance configuration\n# provider = \"provider-name\"\n", encoding="utf-8")

@@ -11,7 +11,7 @@ from pivot.events import EventPool, EventService, EventSupervisor
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, EventDescriptor
 from pivot.runtime import PivotClient, Runtime
-from pivot.session import SessionManager
+from pivot.session import SessionManager, SessionState
 from pivot.tui import PIVOT_THEME, ConversationMessage, PivotApp, PromptEditor, SessionItem, WorkflowView
 from pivot.ui import RuntimeSummary, render_banner, safe_endpoint
 
@@ -59,9 +59,9 @@ def test_textual_cli_shortcut_bindings_exclude_f2_and_alt_navigation() -> None:
 
 
 def test_session_item_renders_runtime_state_and_current_label() -> None:
-    assert "$success" not in SessionItem("12345678", state="ready")._label()
-    assert "$success" in SessionItem("12345678", state="running")._label()
-    assert "$warning" in SessionItem("12345678", state="pending")._label()
+    assert "$success" not in SessionItem("12345678", state=SessionState.READY)._label()
+    assert "$success" in SessionItem("12345678", state=SessionState.RUNNING)._label()
+    assert "$warning" in SessionItem("12345678", state=SessionState.PENDING)._label()
     assert "CURRENT" in SessionItem("12345678", current=True)._label()
     assert "ACTIVE" not in SessionItem("12345678", current=True)._label()
 
@@ -74,10 +74,10 @@ async def test_textual_cli_sorts_sessions_by_state_then_recent_activity(tmp_path
     running_old = runtime.sessions.create()
     running_new = runtime.sessions.create()
     ready_new = runtime.sessions.create()
-    pending._set_state("pending")
-    running_old._set_state("running")
-    running_new._set_state("running")
-    ready_new._set_state("ready")
+    pending._set_state(SessionState.PENDING)
+    running_old._set_state(SessionState.RUNNING)
+    running_new._set_state(SessionState.RUNNING)
+    ready_new._set_state(SessionState.READY)
     app = PivotApp(PivotClient(runtime), ready_old)
 
     async with app.run_test(size=(120, 36)):
@@ -169,7 +169,7 @@ def _runtime(tmp_path: Path, llm=None) -> Runtime:
     registry = CapabilityRegistry()
     events = EventPool()
     manager = SessionManager(llm=llm or EchoLLM(), capabilities=registry, memory=TextMemory(tmp_path / "memory"))
-    config = PivotConfig(workspace_path=tmp_path, provider=ProviderCredential("test", "test-model"))
+    config = PivotConfig(instance_path=tmp_path, provider=ProviderCredential("test", "test-model"))
     event_service = EventService(events, EventSupervisor(events, runner=None))  # type: ignore[arg-type]
     return Runtime(config, registry, events, event_service, manager)
 

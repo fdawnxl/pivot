@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -75,7 +76,14 @@ class SessionProgress:
 
 
 ProgressCallback = Callable[[SessionProgress], None]
-SessionState = Literal["ready", "running", "pending"]
+
+
+class SessionState(StrEnum):
+    """Lifecycle state maintained by the core conversation runtime."""
+
+    READY = "ready"
+    RUNNING = "running"
+    PENDING = "pending"
 
 
 def normalize_session_id(session_id: str) -> str:
@@ -111,7 +119,7 @@ class ConversationSession:
         self.event_service = event_service
         self.max_rounds = max_rounds
         self.history: list[Message] = []
-        self._state: SessionState = "ready"
+        self._state = SessionState.READY
         self._last_active_at = time.time()
         self._state_lock = threading.Lock()
         self._run_lock = threading.Lock()
@@ -132,6 +140,8 @@ class ConversationSession:
             return self._last_active_at
 
     def _set_state(self, state: SessionState) -> None:
+        if not isinstance(state, SessionState):
+            raise TypeError("state must be a SessionState")
         with self._state_lock:
             self._state = state
             self._last_active_at = time.time()
@@ -197,12 +207,12 @@ class ConversationSession:
             raise ValueError("user_input must not be empty")
         if not self._run_lock.acquire(blocking=False):
             raise SessionError("Session is already running")
-        self._set_state("running")
+        self._set_state(SessionState.RUNNING)
         try:
             with log_context(correlation_id=str(uuid4()), session_id=self.session_id):
                 return self._run_correlated(user_input, progress=progress, cancellation=cancellation)
         finally:
-            self._set_state("ready")
+            self._set_state(SessionState.READY)
             self._run_lock.release()
 
     def _run_correlated(
@@ -262,7 +272,7 @@ class ConversationSession:
                 self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
                 try:
                     if call.name == EVENT_WAIT_TOOL:
-                        self._set_state("pending")
+                        self._set_state(SessionState.PENDING)
                         self._emit_progress(
                             progress,
                             "event_wait_started",
@@ -280,7 +290,7 @@ class ConversationSession:
                                 rollback_to=rollback_to,
                             )
                         finally:
-                            self._set_state("running")
+                            self._set_state(SessionState.RUNNING)
                         self._emit_progress(
                             progress,
                             "event_completed",

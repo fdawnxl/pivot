@@ -4,12 +4,12 @@ pivot is a layered agent runtime for edge devices, industrial control and embodi
 
 ## Quick start
 
-The workspace is deliberately explicit. Set `PIVOT_WORKSPACE_PATH` (or pass `--workspace`) and let uv create the project environment. Omit the message to start an interactive conversation:
+The instance is deliberately explicit. Set `PIVOT_INSTANCE_PATH` (or pass `--instance`) and let uv create the project environment. Omit the message to start an interactive conversation:
 
 ```bash
 uv sync --extra dev
-PIVOT_WORKSPACE_PATH=/path/to/workspace uv run pivot
-PIVOT_WORKSPACE_PATH=/path/to/workspace uv run pivot "Hello"
+PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot
+PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot "Hello"
 ```
 
 The interactive CLI is a Textual application with a persistent prompt, Markdown conversation timeline, responsive session sidebar, and inspectable agent trace. Each trace groups model analysis phases, model-provided decision summaries, capability arguments and results, event waits, and result-integration rounds without exposing hidden chain-of-thought. Agent turns run in background workers, so another conversation can be opened while one is working.
@@ -17,29 +17,29 @@ The interactive CLI is a Textual application with a persistent prompt, Markdown 
 Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+N` for a new conversation, `Ctrl+Left`/`Ctrl+Right` to enter the session sidebar and navigate older or newer conversations, `Ctrl+B` to toggle the sidebar, `Ctrl+G` to interrupt the selected conversation, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The bottom shortcut bar shows these common actions and is also clickable. The prompt accepts `/new`, `/next`, `/prev`, `/switch <id-prefix>`, `/session`, `/sessions`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits stop during polling, while a synchronous model or capability request stops at its next safe boundary. The same runtime is also available through `pivot.PivotClient` for services and other clients that do not use the terminal UI. Resume an existing conversation with:
 
 ```bash
-PIVOT_WORKSPACE_PATH=/path/to/workspace uv run pivot --session 4b3c9f24-582c-42b1-bf25-f24a6f907f67
+PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot --session 4b3c9f24-582c-42b1-bf25-f24a6f907f67
 ```
 
 The TUI shows the selected provider, model, conversation, capabilities, and events without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
-The repository also contains a local example workspace at `.tmp/workspace`. It is ignored by git and can be used immediately:
+The repository also contains a local example instance at `.tmp/instance`. It is ignored by git and can be used immediately:
 
 ```bash
-PIVOT_WORKSPACE_PATH="$PWD/.tmp/workspace" uv run pivot "Read the CPU count"
+PIVOT_INSTANCE_PATH="$PWD/.tmp/instance" uv run pivot "Read the CPU count"
 ```
 
-The example workspace also includes a virtual D-Bus sensor:
+The example instance also includes a virtual D-Bus sensor:
 
 ```bash
-uv add --project .tmp/workspace/environment/measure "dbus-next>=0.2.3"
-uv run --project .tmp/workspace/environment/measure python .tmp/workspace/capabilities/measure/virtual_sensor.py --serve
-uv run --project .tmp/workspace/environment/measure python .tmp/workspace/capabilities/measure/virtual_sensor.py -r temperature
+uv add --project .tmp/instance/environment/measure "dbus-next>=0.2.3"
+uv run --project .tmp/instance/environment/measure python .tmp/instance/capabilities/measure/virtual_sensor.py --serve
+uv run --project .tmp/instance/environment/measure python .tmp/instance/capabilities/measure/virtual_sensor.py -r temperature
 ```
 
-An empty workspace is initialized as follows. Existing files are never overwritten:
+An empty instance is initialized as follows. Existing files are never overwritten:
 
 ```text
-workspace/
+instance/
 ├── capabilities/{think,measure,work}/
 ├── dependencies/<dependency-project>/
 ├── environment/{think,measure,work,event}/
@@ -92,9 +92,9 @@ The corresponding environment variables are `PIVOT_LOG_DISPLAY_LEVEL` and `PIVOT
 
 ## Architecture
 
-`pivot.config` bootstraps a workspace; `pivot.logging` configures terminal and rotating-file output; `pivot.dependencies` installs, starts, checks, and stops external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts text and tool calls; `pivot.capabilities` validates and dispatches `think`, `measure` and `work` capabilities; `pivot.events` owns event definitions and FIFO waiters; `pivot.memory` writes UUID-isolated transcripts atomically; `pivot.session` runs the bounded conversation loop; and `pivot.orchestrator` runs independent agents concurrently.
+`pivot.config` bootstraps an instance; `pivot.logging` configures terminal and rotating-file output; `pivot.dependencies` installs, starts, checks, and stops external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts text and tool calls; `pivot.capabilities` validates and dispatches `think`, `measure` and `work` capabilities; `pivot.events` owns event definitions and FIFO waiters; `pivot.memory` writes UUID-isolated transcripts atomically; `pivot.session` runs the bounded conversation loop; and `pivot.orchestrator` runs independent agents concurrently.
 
-Workspace capability scripts are never imported by the pivot process. They use dedicated uv environments and JSON command protocols:
+Instance capability scripts are never imported by the pivot process. They use dedicated uv environments and JSON command protocols:
 
 ```text
 think:   -l -> descriptor, -r -> full triple-quoted capability text
@@ -102,7 +102,7 @@ measure: -l -> descriptor, -r <feature> -> measured JSON value
 work:    -l -> descriptor, -x + JSON stdin -> JSON execution result
 ```
 
-Think descriptors are injected lazily. The model sees their names and summaries at first, then calls the built-in `pivot_read_think` tool only when it needs the full text. Work processes use a fixed workspace directory, a restricted environment, a timeout, and an output limit. This is process isolation intended to protect the pivot interpreter; deployments executing hostile commands should add an operating-system sandbox.
+Think descriptors are injected lazily. The model sees their names and summaries at first, then calls the built-in `pivot_read_think` tool only when it needs the full text. Work processes use a fixed instance directory, a restricted environment, a timeout, and an output limit. This is process isolation intended to protect the pivot interpreter; deployments executing hostile commands should add an operating-system sandbox.
 
 Events are generic monitored fields rather than fixed thresholds. An event descriptor advertises a field and supported operators. The model calls `pivot_wait_event` with the chosen operator, expected value, and timeout. A matching value, timeout, or isolated source error is formatted with the event's injection template, appended as a tool result, and sent back to the LLM so the same conversation can continue.
 

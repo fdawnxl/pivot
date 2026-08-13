@@ -41,13 +41,13 @@ class EventScriptRunner:
         self,
         environment: str | Path,
         *,
-        workspace: str | Path | None = None,
+        instance: str | Path | None = None,
         timeout: float = 15.0,
         uv_binary: str = "uv",
         max_output_bytes: int = 1024 * 1024,
     ) -> None:
         self.environment = Path(environment).expanduser().resolve()
-        self.workspace = Path(workspace).expanduser().resolve() if workspace else self.environment.parent.parent
+        self.instance = Path(instance).expanduser().resolve() if instance else self.environment.parent.parent
         self.timeout = timeout
         self.uv_binary = uv_binary
         self.max_output_bytes = max_output_bytes
@@ -77,7 +77,7 @@ class EventScriptRunner:
                 "DBUS_SYSTEM_BUS_ADDRESS",
             }
         }
-        environment["PIVOT_WORKSPACE_PATH"] = str(self.workspace)
+        environment["PIVOT_INSTANCE_PATH"] = str(self.instance)
         try:
             result = subprocess.run(
                 command,
@@ -85,7 +85,7 @@ class EventScriptRunner:
                 text=True,
                 timeout=self.timeout,
                 check=False,
-                cwd=self.workspace,
+                cwd=self.instance,
                 env=environment,
             )
         except subprocess.TimeoutExpired as exc:
@@ -319,7 +319,7 @@ class EventPool:
 
 
 def load_event_scripts_isolated(root: str | Path, runner: EventScriptRunner) -> tuple[EventDescriptor, ...]:
-    """Load generic event metadata without importing workspace scripts."""
+    """Load generic event metadata without importing instance scripts."""
 
     result: list[EventDescriptor] = []
     for script in sorted(Path(root).expanduser().glob("*.py")):
@@ -327,7 +327,7 @@ def load_event_scripts_isolated(root: str | Path, runner: EventScriptRunner) -> 
             result.extend(runner.list_events(script))
         except EventError as exc:
             LOGGER.warning("Unable to load isolated event script %s: %s", script, exc)
-    LOGGER.info("Workspace event discovery completed loaded=%d root=%s", len(result), root)
+    LOGGER.info("Instance event discovery completed loaded=%d root=%s", len(result), root)
     return tuple(result)
 
 

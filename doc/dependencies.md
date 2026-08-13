@@ -1,9 +1,9 @@
 # pivot dependency protocol
 
-A dependency is an external long-running program that should not share pivot's interpreter or package set. Typical dependencies are sensor servers used by measure capabilities and data-source servers used by events. Every dependency is a standalone uv project under the workspace `dependencies` directory:
+A dependency is an external long-running program that should not share pivot's interpreter or package set. Typical dependencies are sensor servers used by measure capabilities and data-source servers used by events. Every dependency is a standalone uv project under the instance `dependencies` directory:
 
 ```text
-workspace/dependencies/sensor-server/
+instance/dependencies/sensor-server/
 ├── dependency.toml
 ├── pyproject.toml
 ├── uv.lock                 # recommended for reproducible installations
@@ -33,7 +33,7 @@ uv run --project <dependency-project> --no-sync <command...>
 
 After `uv sync` succeeds, pivot atomically creates `.pivot-installed` in the dependency root. Later scans skip package synchronization and launch with `--no-sync`. Remove this marker explicitly when the project's declared packages need to be synchronized again. A failed synchronization never creates the marker.
 
-Each process receives `PIVOT_WORKSPACE_PATH` and `PIVOT_DEPENDENCY_ID`. Its working directory is its project root, and stdout/stderr are written to `logs/dependencies/<id>.log`. Pivot stops processes it owns when the runtime closes. One dependency's installation, startup, or status failure is logged and does not prevent other dependencies or pivot services from loading.
+Each process receives `PIVOT_INSTANCE_PATH` and `PIVOT_DEPENDENCY_ID`. Its working directory is its project root, and stdout/stderr are written to `logs/dependencies/<id>.log`. Pivot stops processes it owns when the runtime closes. One dependency's installation, startup, or status failure is logged and does not prevent other dependencies or pivot services from loading.
 
 Pivot preserves `DBUS_SESSION_BUS_ADDRESS` and `DBUS_SYSTEM_BUS_ADDRESS` when it launches dependency, measure, work, and event subprocesses. A dependency and its capability/event clients can therefore communicate over the same inherited bus without private bus processes, address files, or shell environment reconstruction.
 

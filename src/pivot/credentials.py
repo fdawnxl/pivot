@@ -1,4 +1,4 @@
-"""Permission-aware provider credentials stored in a workspace TOML file."""
+"""Permission-aware provider credentials stored in a instance TOML file."""
 
 from __future__ import annotations
 
