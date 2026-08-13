@@ -7,7 +7,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from .models import ParsedResponse, ToolCall
+from .models import MessageContent, ParsedResponse, ToolCall, normalize_content
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,5 +69,10 @@ def parse_response(response: Any) -> ParsedResponse:
                 call_id=_value(raw_call, "id"),
             )
         )
-    LOGGER.debug("LLM response parsed text_length=%d tool_calls=%d", len(text), len(parsed_calls))
-    return ParsedResponse(text=text, tool_calls=tuple(parsed_calls), raw=response)
+    normalized_source = content if isinstance(content, (str, list, tuple)) else ("" if content is None else str(content))
+    try:
+        normalized_content: MessageContent = normalize_content(normalized_source)
+    except (TypeError, ValueError) as exc:
+        raise ResponseParseError(f"LLM response content is invalid: {exc}") from exc
+    LOGGER.debug("LLM response parsed text_length=%d tool_calls=%d multimodal=%s", len(text), len(parsed_calls), isinstance(normalized_content, tuple))
+    return ParsedResponse(text=text, content=normalized_content, tool_calls=tuple(parsed_calls), raw=response)

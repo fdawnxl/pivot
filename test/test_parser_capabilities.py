@@ -19,6 +19,18 @@ def test_parse_rejects_bad_arguments() -> None:
         parse_response({"choices": [{"message": {"tool_calls": [{"function": {"name": "x", "arguments": "oops"}}]}}]})
 
 
+def test_parse_preserves_multimodal_response_content() -> None:
+    content = [
+        {"type": "text", "text": "I can see it."},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+    ]
+
+    parsed = parse_response({"choices": [{"message": {"content": content}}]})
+
+    assert parsed.text == "I can see it."
+    assert parsed.content == tuple(content)
+
+
 def test_registry_dispatch_and_tools() -> None:
     registry = CapabilityRegistry()
     registry.register(CapabilityDescriptor("add", "work", "Add numbers", {"type": "object"}), lambda a, b: a + b)

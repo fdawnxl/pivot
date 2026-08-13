@@ -17,7 +17,7 @@ from .events import EVENT_WAIT_TOOL, EventError, EventPool, EventService
 from .llm import LLMClient
 from .logging import log_context
 from .memory import TextMemory
-from .models import Message, ToolCall
+from .models import Message, ToolCall, normalize_content
 from .parser import ResponseParseError, parse_response
 
 LOGGER = logging.getLogger(__name__)
@@ -76,6 +76,20 @@ class SessionProgress:
 
 
 ProgressCallback = Callable[[SessionProgress], None]
+
+
+def _capability_content(result: Any) -> str | tuple[dict[str, Any], ...]:
+    """Encode a capability result as text or provider-compatible multimodal parts."""
+
+    candidate = result.get("content") if isinstance(result, dict) and "content" in result else result
+    if isinstance(candidate, (list, tuple)):
+        try:
+            normalized = normalize_content(candidate)
+        except (TypeError, ValueError):
+            normalized = None
+        if isinstance(normalized, tuple):
+            return normalized
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 class SessionState(StrEnum):
@@ -164,7 +178,9 @@ class ConversationSession:
                     if isinstance(arguments, str):
                         arguments = json.loads(arguments)
                     calls.append(ToolCall(function["name"], arguments, raw_call.get("id")))
-                restored.append(Message(value["role"], value.get("content"), value.get("name"), tuple(calls), value.get("tool_call_id")))
+                raw_content = value.get("content")
+                restored_content = normalize_content(raw_content) if raw_content is not None else None
+                restored.append(Message(value["role"], restored_content, value.get("name"), tuple(calls), value.get("tool_call_id")))
             self.history = restored
             if restored:
                 try:
@@ -198,26 +214,32 @@ class ConversationSession:
 
     def run(
         self,
-        user_input: str,
+        user_input: Any,
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
     ) -> str:
-        if not user_input.strip():
+        try:
+            normalized_input = normalize_content(user_input)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"user_input is invalid: {exc}") from exc
+        if isinstance(normalized_input, str) and not normalized_input.strip():
+            raise ValueError("user_input must not be empty")
+        if isinstance(normalized_input, tuple) and not normalized_input:
             raise ValueError("user_input must not be empty")
         if not self._run_lock.acquire(blocking=False):
             raise SessionError("Session is already running")
         self._set_state(SessionState.RUNNING)
         try:
             with log_context(correlation_id=str(uuid4()), session_id=self.session_id):
-                return self._run_correlated(user_input, progress=progress, cancellation=cancellation)
+                return self._run_correlated(normalized_input, progress=progress, cancellation=cancellation)
         finally:
             self._set_state(SessionState.READY)
             self._run_lock.release()
 
     def _run_correlated(
         self,
-        user_input: str,
+        user_input: Any,
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
@@ -230,7 +252,7 @@ class ConversationSession:
         self.history.append(Message(role="user", content=user_input))
         self._persist()
         rollback_to = len(self.history)
-        LOGGER.info("Session turn started session_id=%s input_length=%d", self.session_id, len(user_input))
+        LOGGER.info("Session turn started session_id=%s input_parts=%d", self.session_id, len(user_input) if isinstance(user_input, tuple) else 1)
         self._emit_progress(progress, "turn_started", "Turn started.")
         for round_number in range(1, self.max_rounds + 1):
             self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
@@ -248,7 +270,7 @@ class ConversationSession:
                 LOGGER.exception("Session %s failed in LLM round %d", self.session_id, round_number)
                 self._emit_progress(progress, "turn_failed", f"LLM round failed: {type(exc).__name__}.", round_number=round_number)
                 raise SessionError(f"LLM round {round_number} failed: {type(exc).__name__}: {exc}") from exc
-            self.history.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls))
+            self.history.append(Message(role="assistant", content=response.content, tool_calls=response.tool_calls))
             LOGGER.debug(
                 "Session LLM round completed session_id=%s round=%d tool_calls=%d text_length=%d",
                 self.session_id,
@@ -317,7 +339,7 @@ class ConversationSession:
                             name=call.name,
                             result=result,
                         )
-                    encoded = json.dumps(result, ensure_ascii=False)
+                    tool_content = _capability_content(result)
                 except (CapabilityError, EventError) as exc:
                     LOGGER.warning("Session capability call failed session_id=%s capability=%s", self.session_id, call.name)
                     self._emit_progress(
@@ -328,8 +350,8 @@ class ConversationSession:
                         name=call.name,
                         result={"error": str(exc)},
                     )
-                    encoded = json.dumps({"error": str(exc)}, ensure_ascii=False)
-                self.history.append(Message(role="tool", content=encoded, name=call.name, tool_call_id=call.call_id))
+                    tool_content = json.dumps({"error": str(exc)}, ensure_ascii=False)
+                self.history.append(Message(role="tool", content=tool_content, name=call.name, tool_call_id=call.call_id))
                 self._raise_if_cancelled(cancellation, progress, round_number=round_number, rollback_to=rollback_to)
             self._persist()
         LOGGER.error("Session exceeded maximum rounds session_id=%s max_rounds=%d", self.session_id, self.max_rounds)
@@ -438,7 +460,7 @@ class SessionManager:
     def run(
         self,
         session_id: str,
-        user_input: str,
+        user_input: Any,
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,

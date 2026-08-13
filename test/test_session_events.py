@@ -38,6 +38,37 @@ def test_session_executes_tools_and_persists(tmp_path: Path) -> None:
     assert restored.last_active_at == (tmp_path / session_id / "history.jsonl").stat().st_mtime
 
 
+def test_session_passes_capability_multimodal_content_to_llm_and_restores_it(tmp_path: Path) -> None:
+    content = [
+        {"type": "text", "text": "Captured from the glasses camera."},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+    ]
+    registry = CapabilityRegistry()
+    registry.register(
+        CapabilityDescriptor("capture", "work", "capture", {"type": "object", "properties": {}}),
+        lambda: {"content": content},
+    )
+
+    class MultimodalLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, *, tools=()):
+            self.calls += 1
+            if self.calls == 1:
+                return {"choices": [{"message": {"tool_calls": [{"id": "c1", "function": {"name": "capture", "arguments": "{}"}}]}}]}
+            assert messages[-1].content == tuple(content)
+            return {"choices": [{"message": {"content": "The image is available."}}]}
+
+    session_id = str(uuid4())
+    session = ConversationSession(session_id, llm=MultimodalLLM(), capabilities=registry, memory=TextMemory(tmp_path))
+    assert session.run([{"type": "text", "text": "What do you see?"}]) == "The image is available."
+
+    restored = ConversationSession(session_id, llm=MultimodalLLM(), capabilities=registry, memory=TextMemory(tmp_path))
+    assert restored.history[1].content == ({"type": "text", "text": "What do you see?"},)
+    assert restored.history[3].content == tuple(content)
+
+
 def test_session_runtime_state_tracks_running_and_ready() -> None:
     started = threading.Event()
     release = threading.Event()

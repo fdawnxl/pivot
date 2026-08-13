@@ -224,16 +224,21 @@ class PivotControl:
         start_gate.set()
         return task.task_id
 
-    def submit_message(self, message: str, *, session_id: str | None = None) -> str:
-        if not isinstance(message, str) or not message.strip():
+    def submit_message(self, message: Any, *, session_id: str | None = None) -> str:
+        if isinstance(message, str) and not message.strip():
             raise ControlError("Message must not be empty")
+        if not isinstance(message, str):
+            try:
+                json.dumps(message, ensure_ascii=False)
+            except (TypeError, ValueError) as exc:
+                raise ControlError("Message content must be JSON serializable") from exc
         resolved = self.get_session(session_id).session_id
         return self.submit("session.send", {"session_id": resolved, "message": message})
 
     def run(
         self,
         session_id: str,
-        user_input: str,
+        user_input: Any,
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,

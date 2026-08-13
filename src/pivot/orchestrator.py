@@ -30,7 +30,7 @@ class AgentOrchestrator:
         self.agents = dict(agents)
         self.max_workers = max_workers or len(agents)
 
-    def run(self, user_input: str) -> tuple[AgentResult, ...]:
+    def run(self, user_input: Any) -> tuple[AgentResult, ...]:
         results: list[AgentResult] = []
         LOGGER.info("Agent orchestration started agents=%d", len(self.agents))
         with ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="pivot-agent") as pool:
@@ -50,6 +50,6 @@ class AgentOrchestrator:
         return ordered
 
     @staticmethod
-    def _run_agent(agent_id: str, agent: ConversationSession, user_input: str) -> str:
+    def _run_agent(agent_id: str, agent: ConversationSession, user_input: Any) -> str:
         with log_context(correlation_id=str(uuid4()), agent_id=agent_id, session_id=agent.session_id):
             return agent.run(user_input)

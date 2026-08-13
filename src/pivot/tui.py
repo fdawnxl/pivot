@@ -1174,9 +1174,24 @@ def run_tui(client: PivotClient, session: ConversationSession, *, show_welcome: 
 def _visible_messages(messages: Iterable[Message]) -> Iterable[tuple[str, str]]:
     for message in messages:
         if message.role == "user" and message.content:
-            yield "user", message.content
+            yield "user", _display_content(message.content)
         elif message.role == "assistant" and not message.tool_calls:
-            yield "assistant", message.content or ""
+            yield "assistant", _display_content(message.content)
+
+
+def _display_content(content: Any) -> str:
+    """Render text content and represent multimodal parts without embedding binary data."""
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (tuple, list)):
+        labels = []
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type", "content")
+                labels.append(f"[{part_type} attached]")
+        return " ".join(labels) or "[multimodal content]"
+    return str(content or "")
 
 
 def _summarize(value: Any, *, limit: int = 120) -> str:

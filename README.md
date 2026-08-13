@@ -24,20 +24,6 @@ PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot --session 4b3c9f24-582c-42b1-
 
 The TUI shows the selected provider, model, conversation, capabilities, events, and live dependency health without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
-The repository also contains a local example instance at `.tmp/instance`. It is ignored by git and can be used immediately:
-
-```bash
-PIVOT_INSTANCE_PATH="$PWD/.tmp/instance" uv run pivot "Read the CPU count"
-```
-
-The example instance also includes a virtual D-Bus sensor:
-
-```bash
-uv add --project .tmp/instance/environment/measure "dbus-next>=0.2.3"
-uv run --project .tmp/instance/environment/measure python .tmp/instance/capabilities/measure/virtual_sensor.py --serve
-uv run --project .tmp/instance/environment/measure python .tmp/instance/capabilities/measure/virtual_sensor.py -r temperature
-```
-
 An empty instance is initialized as follows. Existing files are never overwritten:
 
 ```text
@@ -106,6 +92,10 @@ think:   -l -> descriptor, -r -> full triple-quoted capability text
 measure: -l -> descriptor, -r <feature> -> measured JSON value
 work:    -l -> descriptor, -x + JSON stdin -> JSON execution result
 ```
+
+Messages may contain either text or provider-compatible content-part arrays. A capability can return
+`{"content": [...]}` to attach image, audio, or video parts to its tool result; pivot preserves those parts through
+the following model round and UUID-isolated JSONL history without interpreting the media payload.
 
 Think descriptors are injected lazily. The model sees their names and summaries at first, then calls the built-in `pivot_read_think` tool only when it needs the full text. Work processes use a fixed instance directory, a restricted environment, a timeout, and an output limit. This is process isolation intended to protect the pivot interpreter; deployments executing hostile commands should add an operating-system sandbox.
 

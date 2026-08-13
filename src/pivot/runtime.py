@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from .capabilities import CapabilityRegistry
 from .capabilities.discovery import register_instance_capabilities
@@ -131,7 +132,7 @@ class PivotClient:
     def run(
         self,
         session_id: str,
-        user_input: str,
+        user_input: Any,
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
