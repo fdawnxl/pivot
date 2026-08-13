@@ -26,6 +26,18 @@ def _validate_log_level(value: str, *, setting: str) -> str:
     return normalized
 
 
+def _parse_bool(value: Any, *, setting: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ConfigurationError(f"Invalid {setting} value: {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class PivotConfig:
     instance_path: Path
@@ -39,6 +51,10 @@ class PivotConfig:
     dependency_start_timeout: float = 15.0
     dependency_dbus_timeout: float = 1.0
     dependency_stop_timeout: float = 5.0
+    dbus_control_enabled: bool = True
+    dbus_control_bus: str = "session"
+    dbus_control_service: str = "org.pivot.Control"
+    dbus_control_start_timeout: float = 5.0
     log_console_level: str = "INFO"
     log_file_level: str = "DEBUG"
 
@@ -100,6 +116,10 @@ class PivotConfig:
             dependency_start_timeout=get("dependency_start_timeout", 15.0, float),
             dependency_dbus_timeout=get("dependency_dbus_timeout", 1.0, float),
             dependency_stop_timeout=get("dependency_stop_timeout", 5.0, float),
+            dbus_control_enabled=_parse_bool(get("dbus_control_enabled", True), setting="D-Bus control enabled"),
+            dbus_control_bus=get("dbus_control_bus", "session"),
+            dbus_control_service=get("dbus_control_service", "org.pivot.Control"),
+            dbus_control_start_timeout=get("dbus_control_start_timeout", 5.0, float),
             log_console_level=_validate_log_level(console_level, setting="display log level"),
             log_file_level=_validate_log_level(file_level, setting="storage log level"),
         )
@@ -113,8 +133,11 @@ class PivotConfig:
             or config.dependency_start_timeout <= 0
             or config.dependency_dbus_timeout <= 0
             or config.dependency_stop_timeout <= 0
+            or config.dbus_control_start_timeout <= 0
         ):
             raise ConfigurationError("max_rounds and timeouts must be greater than zero")
+        if config.dbus_control_bus not in {"session", "system"}:
+            raise ConfigurationError("dbus_control_bus must be 'session' or 'system'")
         config.ensure_instance()
         configure_logging(
             config.log_console_level,

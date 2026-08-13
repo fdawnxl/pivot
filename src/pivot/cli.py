@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
+import threading
 from typing import TextIO
 
 from .config import ConfigurationError, PivotConfig
+from .dbus_control import ControlDBusError
 from .logging import configure_logging, configure_tui_logging
 from .runtime import PivotClient, Runtime, build_runtime
 from .session import ConversationSession
@@ -22,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--instance", help="Path to the pivot instance (or set PIVOT_INSTANCE_PATH)")
     parser.add_argument("--session", help="Conversation UUID to resume; omitted creates a new conversation")
     parser.add_argument("--no-banner", action="store_true", help="Suppress the startup logo and runtime summary")
+    parser.add_argument("--no-dbus", action="store_true", help="Do not export the pivot D-Bus control interface")
+    parser.add_argument("--dbus-only", action="store_true", help="Run only the D-Bus control service until interrupted")
     parser.add_argument("message", nargs="?", help="One user message; omit for interactive mode or stdin")
     return parser
 
@@ -41,12 +46,34 @@ def _show_banner(runtime: Runtime, session: ConversationSession, stream: TextIO)
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.dbus_only and args.no_dbus:
+        build_parser().error("--dbus-only and --no-dbus cannot be used together")
+    if args.dbus_only and args.message is not None:
+        build_parser().error("--dbus-only does not accept a message")
     configure_logging("INFO")
     client: PivotClient | None = None
     try:
         client = PivotClient(build_runtime(PivotConfig.load(instance_path=args.instance)))
         runtime = client.runtime
         session = runtime.sessions.get(args.session) if args.session else runtime.sessions.create()
+        client.select_session(session.session_id)
+        dbus_required = args.dbus_only
+        if runtime.config.dbus_control_enabled and not args.no_dbus:
+            try:
+                client.start_dbus(
+                    bus=runtime.config.dbus_control_bus,
+                    service_name=runtime.config.dbus_control_service,
+                    start_timeout=runtime.config.dbus_control_start_timeout,
+                )
+            except ControlDBusError:
+                if dbus_required:
+                    raise
+                LOGGER.warning("D-Bus control is unavailable; continuing with the local client")
+        elif dbus_required:
+            raise ConfigurationError("D-Bus control is disabled by configuration")
+        if args.dbus_only:
+            _wait_for_shutdown(client)
+            return 0
         if args.message is None and sys.stdin.isatty():
             configure_tui_logging()
             run_tui(client, session, show_welcome=not args.no_banner)
@@ -66,3 +93,26 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if client is not None:
             client.close()
+
+
+def _wait_for_shutdown(client: PivotClient) -> None:
+    """Wait for SIGINT or SIGTERM while the D-Bus control service is active."""
+
+    stopped = threading.Event()
+    previous: dict[int, object] = {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        stopped.set()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, request_stop)
+    unsubscribe = client.control.subscribe(
+        lambda event, _payload: stopped.set() if event == "shutdown_requested" else None
+    )
+    LOGGER.info("D-Bus-only control process is ready")
+    try:
+        stopped.wait()
+    finally:
+        unsubscribe()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)

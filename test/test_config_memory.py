@@ -96,3 +96,27 @@ def test_missing_provider_still_bootstraps_empty_instance(tmp_path: Path) -> Non
         PivotConfig.load(instance_path=instance)
     assert (instance / "config.toml").is_file()
     assert (instance / "environment/work/pyproject.toml").is_file()
+
+
+def test_dbus_control_configuration_uses_environment_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text(
+        'provider = "local"\n'
+        'dbus_control_enabled = false\n'
+        'dbus_control_bus = "system"\n'
+        'dbus_control_service = "org.pivot.FromFile"\n',
+        encoding="utf-8",
+    )
+    CredentialStore(instance / "credentials.toml").save({"local": ProviderCredential("local", "model")})
+    monkeypatch.setenv("PIVOT_DBUS_CONTROL_ENABLED", "true")
+    monkeypatch.setenv("PIVOT_DBUS_CONTROL_BUS", "session")
+    monkeypatch.setenv("PIVOT_DBUS_CONTROL_SERVICE", "org.pivot.FromEnvironment")
+
+    config = PivotConfig.load(instance_path=instance)
+
+    assert config.dbus_control_enabled
+    assert config.dbus_control_bus == "session"
+    assert config.dbus_control_service == "org.pivot.FromEnvironment"

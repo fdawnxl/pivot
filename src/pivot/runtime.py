@@ -105,6 +105,7 @@ class PivotClient:
 
         self.runtime = runtime
         self.control = PivotControl(runtime)
+        self._dbus_service: object | None = None
 
     @classmethod
     def open(cls, *, instance_path: str | None = None) -> "PivotClient":
@@ -144,9 +145,36 @@ class PivotClient:
 
         return self.control.sessions()
 
+    def start_dbus(
+        self,
+        *,
+        bus: str = "session",
+        service_name: str = "org.pivot.Control",
+        bus_address: str | None = None,
+        start_timeout: float = 5.0,
+    ) -> object:
+        """Export the shared control surface through D-Bus."""
+
+        from .dbus_control import ControlDBusService
+
+        if self._dbus_service is None:
+            service = ControlDBusService(
+                self.control,
+                bus=bus,
+                service_name=service_name,
+                bus_address=bus_address,
+                start_timeout=start_timeout,
+            )
+            service.start()
+            self._dbus_service = service
+        return self._dbus_service
+
     def close(self) -> None:
         """Release dependency processes owned by this client runtime."""
 
+        if self._dbus_service is not None:
+            self._dbus_service.stop()
+            self._dbus_service = None
         self.control.close()
         self.runtime.close()
 

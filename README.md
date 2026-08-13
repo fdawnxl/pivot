@@ -14,6 +14,8 @@ PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot "Hello"
 
 The interactive CLI is a Textual application with a persistent prompt, Markdown conversation timeline, responsive session sidebar, and inspectable agent trace. Each trace groups model analysis phases, model-provided decision summaries, capability arguments and results, event waits, and result-integration rounds without exposing hidden chain-of-thought. Agent turns run in background workers, so another conversation can be opened while one is working.
 
+While a CLI process is running, pivot also attempts to export the same application control surface on the session D-Bus as `org.pivot.Control` at `/org/pivot/Control`. Remote clients can create or select conversations, list and read history, send messages asynchronously, interrupt work, inspect capabilities/events/dependencies, invoke extensible control operations, and request shutdown. The CLI and TUI continue to call local Python methods directly if D-Bus is unavailable. Run a headless control process with `uv run pivot --dbus-only`, or disable export with `--no-dbus`. See [the control protocol](doc/control-dbus.md).
+
 Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+N` for a new conversation, `Ctrl+Left`/`Ctrl+Right` to enter the session sidebar and navigate older or newer conversations, `Ctrl+B` to toggle the sidebar, `Ctrl+G` to interrupt the selected conversation, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The bottom shortcut bar shows these common actions and is also clickable. The prompt accepts `/new`, `/next`, `/prev`, `/switch <id-prefix>`, `/session`, `/sessions`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits stop during polling, while a synchronous model or capability request stops at its next safe boundary. The same runtime is also available through `pivot.PivotClient` for services and other clients that do not use the terminal UI. Resume an existing conversation with:
 
 ```bash
@@ -76,6 +78,9 @@ api_key = "provider-secret"
 ```toml
 provider = "local"
 max_rounds = 8
+dbus_control_enabled = true
+dbus_control_bus = "session"
+dbus_control_service = "org.pivot.Control"
 ```
 
 `PIVOT_PROVIDER` overrides the selected provider. Other runtime settings use `PIVOT_<NAME>`, then `config.toml`, then code defaults. Model names, API endpoints, and API keys are read only from `credentials.toml` and are never written to ordinary configuration or logs.
