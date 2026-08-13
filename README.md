@@ -50,7 +50,7 @@ instance/
 └── credentials.toml        # named LLM providers, mode 0600
 ```
 
-Long-running external programs live in `dependencies`, with one standalone uv project per first-level directory. A valid project declares a meaningful D-Bus id and argv-style start command in `dependency.toml`. Pivot synchronizes its packages only on the first successful start, launches it in its own uv environment, confirms readiness through the common D-Bus status and heartbeat interface, and stops the process when the runtime closes. See [the dependency protocol](doc/dependencies.md) for the manifest and service contract.
+Long-running external programs live in `dependencies`, with one standalone uv project per first-level directory. A valid project declares a stable logical id, an explicit D-Bus bus and service name, and an argv-style start command in `dependency.toml`. Pivot synchronizes its packages only on the first successful start, launches it in its own uv environment, confirms readiness through the common D-Bus status and heartbeat interface, and stops the process when the runtime closes. See [the dependency protocol](doc/dependencies.md) for the manifest and service contract.
 
 LiteLLM is a core dependency and is installed by `uv sync`:
 
