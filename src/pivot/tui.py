@@ -576,6 +576,7 @@ class PivotApp(App[None]):
         self._quit_armed = False
         self._session_refresh_pending = False
         self._session_refresh_dirty = False
+        self._control_unsubscribe: Any = None
         self._session_ids = self._discover_session_ids()
 
     def compose(self) -> ComposeResult:
@@ -615,6 +616,7 @@ class PivotApp(App[None]):
             yield Button("Quit (Ctrl+Q)", id="shortcut-quit", classes="shortcut-button")
 
     async def on_mount(self) -> None:
+        self._control_unsubscribe = self.client.control.subscribe(self._on_control_event)
         compact = self.size.width < 90
         self.set_class(compact, "compact")
         self.query_one("#body").set_class(compact, "sessions-hidden")
@@ -624,6 +626,41 @@ class PivotApp(App[None]):
             self.set_interval(5.0, self._request_dependency_refresh)
         await self._show_session(self.current_session)
         self.query_one("#prompt", PromptEditor).focus()
+
+    def on_unmount(self) -> None:
+        if self._control_unsubscribe is not None:
+            self._control_unsubscribe()
+            self._control_unsubscribe = None
+
+    def _on_control_event(self, event: str, payload: dict[str, Any]) -> None:
+        try:
+            self.call_from_thread(self._apply_control_event, event, payload)
+        except RuntimeError:
+            LOGGER.debug("TUI closed before control event delivery event=%s", event)
+
+    def _apply_control_event(self, event: str, payload: dict[str, Any]) -> None:
+        if event == "shutdown_requested":
+            self.exit()
+            return
+        session_id = payload.get("session_id")
+        if event == "session_selected" and isinstance(session_id, str):
+            if session_id != self.current_session.session_id:
+                self.call_later(self._show_session, self.runtime.sessions.get(session_id))
+            return
+        if event == "session_created":
+            self._schedule_session_refresh()
+            return
+        if (
+            event == "task_changed"
+            and payload.get("operation") == "session.send"
+        ):
+            self._schedule_session_refresh()
+            if (
+                payload.get("state") in {"completed", "failed", "cancelled"}
+                and session_id == self.current_session.session_id
+                and session_id not in self.session_turns
+            ):
+                self.call_later(self._show_session, self.current_session, focus_prompt=False)
 
     def on_resize(self, event: events.Resize) -> None:
         compact = event.size.width < 90
@@ -874,6 +911,7 @@ class PivotApp(App[None]):
         return next((view for view in self.query(WorkflowView) if view.state.turn_id == turn.turn_id), None)
 
     async def _show_session(self, session: ConversationSession, *, focus_prompt: bool = True) -> None:
+        self.client.select_session(session.session_id)
         self.current_session = session
         timeline = self.query_one("#timeline", VerticalScroll)
         await timeline.remove_children()

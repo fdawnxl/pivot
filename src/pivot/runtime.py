@@ -101,7 +101,10 @@ class PivotClient:
     """Provider-neutral application facade for non-CLI integrations."""
 
     def __init__(self, runtime: Runtime) -> None:
+        from .control import PivotControl
+
         self.runtime = runtime
+        self.control = PivotControl(runtime)
 
     @classmethod
     def open(cls, *, instance_path: str | None = None) -> "PivotClient":
@@ -112,12 +115,17 @@ class PivotClient:
     def create_session(self) -> ConversationSession:
         """Create a new isolated conversation."""
 
-        return self.runtime.sessions.create()
+        return self.control.create_session()
 
     def get_session(self, session_id: str) -> ConversationSession:
         """Load or create a canonical UUID conversation."""
 
-        return self.runtime.sessions.get(session_id)
+        return self.control.get_session(session_id)
+
+    def select_session(self, session_id: str) -> ConversationSession:
+        """Select the conversation used by implicit control operations."""
+
+        return self.control.select_session(session_id)
 
     def run(
         self,
@@ -129,16 +137,17 @@ class PivotClient:
     ) -> str:
         """Run one conversation turn without involving terminal UI code."""
 
-        return self.runtime.sessions.run(session_id, user_input, progress=progress, cancellation=cancellation)
+        return self.control.run(session_id, user_input, progress=progress, cancellation=cancellation)
 
     def sessions(self) -> tuple[ConversationSession, ...]:
         """List sessions currently managed by this client."""
 
-        return self.runtime.sessions.sessions()
+        return self.control.sessions()
 
     def close(self) -> None:
         """Release dependency processes owned by this client runtime."""
 
+        self.control.close()
         self.runtime.close()
 
     def __enter__(self) -> "PivotClient":

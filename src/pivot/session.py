@@ -416,21 +416,24 @@ class SessionManager:
     def __init__(self, **session_dependencies: Any) -> None:
         self._dependencies = session_dependencies
         self._sessions: dict[str, ConversationSession] = {}
+        self._lock = threading.RLock()
 
     def create(self) -> ConversationSession:
         """Create a session with a unique UUID4 identifier."""
 
-        while True:
-            session_id = str(uuid4())
-            if session_id not in self._sessions:
-                return self.get(session_id)
+        with self._lock:
+            while True:
+                session_id = str(uuid4())
+                if session_id not in self._sessions:
+                    return self.get(session_id)
 
     def get(self, session_id: str) -> ConversationSession:
         canonical = normalize_session_id(session_id)
-        if canonical not in self._sessions:
-            self._sessions[canonical] = ConversationSession(canonical, **self._dependencies)
-            LOGGER.info("Session created session_id=%s", canonical)
-        return self._sessions[canonical]
+        with self._lock:
+            if canonical not in self._sessions:
+                self._sessions[canonical] = ConversationSession(canonical, **self._dependencies)
+                LOGGER.info("Session created session_id=%s", canonical)
+            return self._sessions[canonical]
 
     def run(
         self,
@@ -445,4 +448,24 @@ class SessionManager:
     def sessions(self) -> tuple[ConversationSession, ...]:
         """Return sessions in stable UUID order for interactive status displays."""
 
-        return tuple(self._sessions[key] for key in sorted(self._sessions))
+        with self._lock:
+            return tuple(self._sessions[key] for key in sorted(self._sessions))
+
+    def available_sessions(self) -> tuple[ConversationSession, ...]:
+        """Load and return managed and persisted sessions in stable UUID order."""
+
+        if self._dependencies.get("memory") is not None:
+            memory = self._dependencies["memory"]
+            try:
+                paths = tuple(memory.root.iterdir()) if memory.root.is_dir() else ()
+            except OSError as exc:
+                LOGGER.warning("Unable to discover persisted sessions error_type=%s", type(exc).__name__)
+                paths = ()
+            for path in paths:
+                if not path.is_dir() or not (path / "history.jsonl").is_file():
+                    continue
+                try:
+                    self.get(path.name)
+                except (ValueError, OSError):
+                    LOGGER.debug("Skipping invalid persisted session path=%s", path)
+        return self.sessions()
