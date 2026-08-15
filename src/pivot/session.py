@@ -268,6 +268,7 @@ class ConversationSession:
                 "preferred_tool": "pivot_action",
                 "text_fallback": "<pivot-action>{JSON}</pivot-action>",
                 "shape": {"kind": "capability|event|control|executor", "name": "operation", "arguments": {}},
+                "capability_kind_rule": "Use kind=capability for every think, measure, or work capability.",
             },
             "instruction": (
                 role_instruction

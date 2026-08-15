@@ -31,6 +31,13 @@ class ActionKind(StrEnum):
     EXECUTOR = "executor"
 
 
+_ACTION_KIND_ALIASES = {
+    "think": ActionKind.CAPABILITY,
+    "measure": ActionKind.CAPABILITY,
+    "work": ActionKind.CAPABILITY,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ActionRequest:
     """One validated action emitted by an agent."""
@@ -60,7 +67,8 @@ def action_tool() -> dict[str, Any]:
             "name": ACTION_TOOL,
             "description": (
                 "Perform one pivot framework action. Use this for capabilities, event waits, "
-                "agent control, and command executors."
+                "agent control, and command executors. For think, measure, and work capabilities, "
+                "kind must be capability."
             ),
             "parameters": {
                 "type": "object",
@@ -157,7 +165,8 @@ class ActionDetector:
         name = value.get("name")
         arguments = value.get("arguments")
         try:
-            normalized_kind = ActionKind(kind)
+            alias = _ACTION_KIND_ALIASES.get(kind, kind) if isinstance(kind, str) else kind
+            normalized_kind = ActionKind(alias)
         except (TypeError, ValueError) as exc:
             raise ActionError(f"Unknown pivot action kind: {kind!r}") from exc
         if not isinstance(name, str) or not name.strip():
