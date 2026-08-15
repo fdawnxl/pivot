@@ -606,7 +606,7 @@ class PivotApp(App[None]):
         self.current_session = self.runtime.agents.main_agent if self.runtime.agents is not None else session
         self.show_welcome = show_welcome
         self.turns: dict[str, TurnState] = {}
-        self.session_turns: dict[str, str] = {}
+        self.session_turns: dict[str, list[str]] = {}
         self._quit_armed = False
         self._session_refresh_pending = False
         self._session_refresh_dirty = False
@@ -747,14 +747,11 @@ class PivotApp(App[None]):
             await self._run_command(prompt)
             return
         session_id = self.current_session.session_id
-        if session_id in self.session_turns:
-            self.notify("The main agent is still working. Stop it before sending another request.", severity="warning")
-            return
         editor = self.query_one("#prompt", PromptEditor)
         editor.text = ""
         turn = TurnState(str(uuid4()), session_id, prompt)
         self.turns[turn.turn_id] = turn
-        self.session_turns[session_id] = turn.turn_id
+        self.session_turns.setdefault(session_id, []).append(turn.turn_id)
         timeline = self.query_one("#timeline", VerticalScroll)
         self._remove_empty_state()
         await timeline.mount(ConversationMessage("user", prompt), WorkflowView(turn))
@@ -943,7 +940,11 @@ class PivotApp(App[None]):
                 step.state = "interrupted" if interrupted else "failed" if error else "done"
                 if interrupted:
                     step.result = "Stopped by the user"
-        self.session_turns.pop(turn.session_id, None)
+        queued = self.session_turns.get(turn.session_id, [])
+        if turn.turn_id in queued:
+            queued.remove(turn.turn_id)
+        if not queued:
+            self.session_turns.pop(turn.session_id, None)
         if turn.session_id == self.current_session.session_id:
             workflow = self._workflow_for(turn)
             if workflow is not None:
@@ -1020,13 +1021,13 @@ class PivotApp(App[None]):
         messages = tuple(_visible_messages(session.history))
         if messages:
             await timeline.mount(*(ConversationMessage(role, content) for role, content in messages))
-        turn_id = self.session_turns.get(session.session_id)
-        if turn_id is not None:
+        turn_ids = self.session_turns.get(session.session_id, [])
+        for turn_id in turn_ids:
             turn = self.turns[turn_id]
             if not messages or messages[-1] != ("user", turn.prompt):
                 await timeline.mount(ConversationMessage("user", turn.prompt))
             await timeline.mount(WorkflowView(turn))
-        if not messages and turn_id is None:
+        if not messages and not turn_ids:
             config = self.runtime.config
             capabilities = len(self.runtime.registry.descriptors())
             events_count = len(self.runtime.events.descriptors())
@@ -1153,11 +1154,13 @@ class PivotApp(App[None]):
         session_id = self.current_session.session_id
         title = "Main Agent" if self.agent_mode else f"Conversation  {session_id[:8]}"
         self.query_one("#conversation-title", Static).update(title)
-        turn_id = self.session_turns.get(session_id)
-        state = self.turns[turn_id].status if turn_id else "Ready"
+        turn_ids = self.session_turns.get(session_id, [])
+        state = self.turns[turn_ids[0]].status if turn_ids else "Ready"
+        if len(turn_ids) > 1:
+            state += f"  ·  {len(turn_ids) - 1} queued"
         self.query_one("#conversation-state", Static).update(state)
-        self.query_one("#send", Button).display = turn_id is None
-        self.query_one("#stop", Button).display = turn_id is not None
+        self.query_one("#send", Button).display = True
+        self.query_one("#stop", Button).display = bool(turn_ids)
 
     async def _run_command(self, value: str) -> None:
         command, _, argument = value.partition(" ")
@@ -1263,11 +1266,11 @@ class PivotApp(App[None]):
         session_list.focus()
 
     def action_interrupt_turn(self) -> None:
-        turn_id = self.session_turns.get(self.current_session.session_id)
-        if turn_id is None:
+        turn_ids = self.session_turns.get(self.current_session.session_id, [])
+        if not turn_ids:
             self.notify("This conversation is not running.")
             return
-        turn = self.turns[turn_id]
+        turn = self.turns[turn_ids[0]]
         if turn.cancellation.is_cancelled():
             self.notify("Interruption is already pending.")
             return

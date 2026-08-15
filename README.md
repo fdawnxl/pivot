@@ -20,6 +20,8 @@ While a CLI process is running, pivot also attempts to export the same applicati
 
 Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+B` to toggle the agent sidebar, `Ctrl+G` to interrupt the main agent and its active worker, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The prompt accepts `/agents`, `/session`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits and delegated workers stop during safe polling boundaries, while a synchronous model, capability, or executor request stops at its next safe boundary. The same runtime is available through `pivot.PivotClient.run_main` for non-terminal clients.
 
+The main agent has a single FIFO mailbox shared by local and remote callers. New messages are accepted while it is active, remain visibly queued, and run in receipt order; cancelling one queued request does not block later messages. Worker agents remain directly scheduled by the main agent and do not use this mailbox.
+
 The TUI shows the selected provider, model, conversation, capabilities, events, and live dependency health without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
 An empty instance is initialized as follows. Existing files are never overwritten:

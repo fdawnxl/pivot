@@ -420,7 +420,7 @@ async def test_textual_cli_interrupts_active_turn(tmp_path: Path) -> None:
 
         await pilot.press("ctrl+g")
         await pilot.pause()
-        turn = app.turns[app.session_turns[session.session_id]]
+        turn = app.turns[app.session_turns[session.session_id][0]]
         assert turn.cancellation.is_cancelled()
         assert turn.status == "Stopping at the next safe point"
 

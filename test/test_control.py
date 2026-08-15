@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -97,3 +98,67 @@ def test_control_cancels_local_client_turn(tmp_path: Path) -> None:
     thread.join(timeout=2)
     assert len(error) == 1 and isinstance(error[0], SessionCancelled)
     client.close()
+
+
+def test_main_agent_requests_run_in_fifo_order(tmp_path: Path) -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    received: list[str] = []
+
+    class OrderedLLM:
+        def complete(self, messages, *, tools=()):
+            user = next(message.content for message in reversed(messages) if message.role == "user")
+            assert isinstance(user, str)
+            received.append(user)
+            if user == "first":
+                first_started.set()
+                release_first.wait(timeout=2)
+            return {"choices": [{"message": {"content": f"ack: {user}"}}]}
+
+    control = PivotControl(_runtime(tmp_path, OrderedLLM()))
+    control.create_session()
+    first = control.submit_message("first")
+    assert first_started.wait(timeout=1)
+    second = control.submit_message("second")
+    third = control.submit_message("third")
+    time.sleep(0.05)
+    assert control.task(second).state == ControlTaskState.QUEUED
+    assert control.task(third).state == ControlTaskState.QUEUED
+
+    release_first.set()
+    assert control.wait_task(first, timeout=2).state == ControlTaskState.COMPLETED
+    assert control.wait_task(second, timeout=2).result["response"] == "ack: second"
+    assert control.wait_task(third, timeout=2).result["response"] == "ack: third"
+    assert received == ["first", "second", "third"]
+    control.close()
+
+
+def test_cancelling_queued_request_does_not_block_later_requests(tmp_path: Path) -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    received: list[str] = []
+
+    class OrderedLLM:
+        def complete(self, messages, *, tools=()):
+            user = next(message.content for message in reversed(messages) if message.role == "user")
+            assert isinstance(user, str)
+            received.append(user)
+            if user == "first":
+                first_started.set()
+                release_first.wait(timeout=2)
+            return {"choices": [{"message": {"content": f"ack: {user}"}}]}
+
+    control = PivotControl(_runtime(tmp_path, OrderedLLM()))
+    control.create_session()
+    first = control.submit_message("first")
+    assert first_started.wait(timeout=1)
+    cancelled = control.submit_message("cancelled")
+    last = control.submit_message("last")
+    assert control.cancel_task(cancelled)
+    release_first.set()
+
+    assert control.wait_task(first, timeout=2).state == ControlTaskState.COMPLETED
+    assert control.wait_task(cancelled, timeout=2).state == ControlTaskState.CANCELLED
+    assert control.wait_task(last, timeout=2).state == ControlTaskState.COMPLETED
+    assert received == ["first", "last"]
+    control.close()

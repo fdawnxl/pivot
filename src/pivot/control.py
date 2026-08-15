@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .models import Message, ToolCall, normalize_content
+from .mailbox import MainAgentMailbox
 from .session import CancellationToken, ConversationSession, ProgressCallback, SessionCancelled
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ class ControlTask:
     updated_at: float
     cancellation: CancellationToken
     session_id: str | None = None
+    queue_sequence: int | None = None
     result: Any = None
     error: str | None = None
     future: Future[Any] | None = None
@@ -73,6 +75,7 @@ class ControlTask:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "session_id": self.session_id,
+            "queue_sequence": self.queue_sequence,
             "result": self.result,
             "error": self.error,
         }
@@ -102,6 +105,7 @@ class PivotControl:
         self._tasks: OrderedDict[str, ControlTask] = OrderedDict()
         self._listeners: set[ControlListener] = set()
         self._active_cancellations: dict[str, set[CancellationToken]] = {}
+        self._main_mailbox = MainAgentMailbox()
         main_agent = runtime.agents.main_agent if runtime.agents is not None else None
         initial_session = selected_session or main_agent
         self._selected_session_id = initial_session.session_id if initial_session else None
@@ -207,8 +211,10 @@ class PivotControl:
             if registered is None:
                 raise ControlError(f"Unknown control operation: {operation}")
         values = dict(arguments or {})
+        queue_sequence: int | None = None
         if operation == "session.send":
             values["session_id"] = self.get_session(_optional_session_id(values)).session_id
+            queue_sequence = self._main_mailbox.issue()
         try:
             json.dumps(values, ensure_ascii=False)
         except (TypeError, ValueError) as exc:
@@ -223,6 +229,7 @@ class PivotControl:
             now,
             CancellationToken(),
             session_id=_optional_session_id(values) if operation == "session.send" else None,
+            queue_sequence=queue_sequence,
         )
         with self._lock:
             self._prune_tasks()
@@ -256,14 +263,40 @@ class PivotControl:
 
         session = self.get_session(session_id)
         token = cancellation or CancellationToken()
+        sequence = self._main_mailbox.issue()
+        return self._run_queued(
+            session,
+            user_input,
+            token,
+            sequence,
+            progress=progress,
+        )
+
+    def _run_queued(
+        self,
+        session: ConversationSession,
+        user_input: Any,
+        token: CancellationToken,
+        sequence: int,
+        *,
+        progress: ProgressCallback | None = None,
+        task: ControlTask | None = None,
+    ) -> str:
+        """Run one main-agent request at its reserved FIFO position."""
+
         with self._lock:
             self._active_cancellations.setdefault(session.session_id, set()).add(token)
         try:
-            return self.runtime.sessions.run(
-                session.session_id,
-                user_input,
-                progress=progress,
-                cancellation=token,
+            return self._main_mailbox.execute(
+                sequence,
+                token,
+                lambda: self.runtime.sessions.run(
+                    session.session_id,
+                    user_input,
+                    progress=progress,
+                    cancellation=token,
+                ),
+                on_started=(lambda: self._mark_task_running(task)) if task is not None else None,
             )
         finally:
             with self._lock:
@@ -305,6 +338,8 @@ class PivotControl:
             if task.state == ControlTaskState.QUEUED:
                 task.state = ControlTaskState.CANCELLED
                 task.updated_at = time.time()
+                if task.queue_sequence is not None:
+                    self._main_mailbox.skip(task.queue_sequence)
                 if task.future is not None:
                     task.future.cancel()
         self._emit("task_changed", task.as_dict())
@@ -371,14 +406,18 @@ class PivotControl:
                 task.updated_at = time.time()
                 cancelled = True
             else:
-                task.state = ControlTaskState.RUNNING
-                task.updated_at = time.time()
+                if task.queue_sequence is None:
+                    task.state = ControlTaskState.RUNNING
+                    task.updated_at = time.time()
                 cancelled = False
         self._emit("task_changed", task.as_dict())
         if cancelled:
             return
         try:
-            result = operation.handler(task.arguments, task.cancellation)
+            if task.operation == "session.send":
+                result = self._run_message_task(task)
+            else:
+                result = operation.handler(task.arguments, task.cancellation)
             json.dumps(result, ensure_ascii=False)
         except SessionCancelled:
             self._finish_task(task, ControlTaskState.CANCELLED)
@@ -397,6 +436,33 @@ class PivotControl:
             self._finish_task(task, ControlTaskState.FAILED, error=f"{type(exc).__name__}: {exc}")
         else:
             self._finish_task(task, ControlTaskState.COMPLETED, result=result)
+
+    def _run_message_task(self, task: ControlTask) -> dict[str, Any]:
+        if task.queue_sequence is None:
+            raise ControlError("Main-agent request has no FIFO sequence")
+        session = self.get_session(_optional_session_id(task.arguments))
+        if "message" not in task.arguments:
+            raise ControlError("message is required")
+        try:
+            message = normalize_content(task.arguments["message"])
+        except (TypeError, ValueError) as exc:
+            raise ControlError(f"message is invalid: {exc}") from exc
+        response = self._run_queued(
+            session,
+            message,
+            task.cancellation,
+            task.queue_sequence,
+            task=task,
+        )
+        return {"session_id": session.session_id, "response": response}
+
+    def _mark_task_running(self, task: ControlTask) -> None:
+        with self._lock:
+            if task.state == ControlTaskState.CANCELLED:
+                raise SessionCancelled("Main-agent request was cancelled while queued")
+            task.state = ControlTaskState.RUNNING
+            task.updated_at = time.time()
+        self._emit("task_changed", task.as_dict())
 
     def _finish_task(
         self,
