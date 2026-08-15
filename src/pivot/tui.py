@@ -17,6 +17,7 @@ from textual.message import Message as TextualMessage
 from textual.theme import Theme
 from textual.widgets import Button, Label, ListItem, ListView, LoadingIndicator, Markdown, Static, TextArea
 
+from .agents import AgentRecord
 from .dependencies import DependencyState, DependencyStatus
 from .models import Message
 from .runtime import PivotClient
@@ -110,7 +111,7 @@ class ConversationMessage(Vertical):
 class WorkflowStep:
     """One inspectable model, capability, or event phase in a turn."""
 
-    kind: Literal["model", "decision", "capability", "event"]
+    kind: Literal["model", "decision", "capability", "event", "executor", "control", "agent"]
     name: str
     label: str
     round_number: int
@@ -168,7 +169,15 @@ class WorkflowView(Vertical):
             "failed": "[bold $error]![/]",
             "interrupted": "[bold $warning]x[/]",
         }
-        kinds = {"model": "MODEL", "decision": "DECISION", "capability": "CAPABILITY", "event": "EVENT"}
+        kinds = {
+            "model": "MODEL",
+            "decision": "DECISION",
+            "capability": "CAPABILITY",
+            "event": "EVENT",
+            "executor": "EXECUTOR",
+            "control": "CONTROL",
+            "agent": "WORKER",
+        }
         rows = []
         for index, step in enumerate(self.state.steps, 1):
             heading = f"{index:02d}  {kinds[step.kind]}  [bold]{escape(step.label)}[/]  [dim]round {step.round_number}[/]"
@@ -208,6 +217,30 @@ class SessionItem(ListItem):
         return f"{markers[self.state]}  {self.session_id[:8]}{current}"
 
 
+class AgentItem(ListItem):
+    """Read-only main or worker agent lifecycle entry."""
+
+    def __init__(self, record: AgentRecord) -> None:
+        self.record = record
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        yield Label(self._label())
+
+    def _label(self) -> str:
+        snapshot = self.record.as_dict()
+        state = snapshot["state"]
+        marker = {
+            "running": "[bold $success]●[/]",
+            "pending": "[bold $warning]●[/]",
+            "completed": "[bold $success]√[/]",
+            "failed": "[bold $error]×[/]",
+            "cancelled": "[bold $warning]×[/]",
+        }.get(state, "○")
+        role = "MAIN" if snapshot["role"] == "main" else "WORKER"
+        return f"{marker}  {escape(snapshot['name'])}  [dim]{role}[/]"
+
+
 class DependencyItem(Static):
     """One dependency lifecycle snapshot rendered for quick scanning."""
 
@@ -227,7 +260,7 @@ class DependencyItem(Static):
         return f"{markers[self.status.state]}  {escape(self.status.dependency_id)}"
 
 class PivotApp(App[None]):
-    """Modern multi-session terminal client for a pivot runtime."""
+    """Main-agent terminal client with inspectable delegated workers."""
 
     TITLE = "pivot"
     SUB_TITLE = "agent runtime"
@@ -323,18 +356,18 @@ class PivotApp(App[None]):
         color: $text-muted;
     }
 
-    SessionItem {
+    SessionItem, AgentItem {
         height: 3;
         padding: 1;
         color: $text-muted;
     }
 
-    SessionItem:hover {
+    SessionItem:hover, AgentItem:hover {
         background: $primary;
         color: $primary-ink;
     }
 
-    SessionItem.-highlight {
+    SessionItem.-highlight, AgentItem.-highlight {
         background: $primary;
         color: $primary-ink;
     }
@@ -569,7 +602,8 @@ class PivotApp(App[None]):
         self.theme = PIVOT_THEME.name
         self.client = client
         self.runtime = client.runtime
-        self.current_session = session
+        self.agent_mode = self.runtime.agents is not None
+        self.current_session = self.runtime.agents.main_agent if self.runtime.agents is not None else session
         self.show_welcome = show_welcome
         self.turns: dict[str, TurnState] = {}
         self.session_turns: dict[str, str] = {}
@@ -586,9 +620,10 @@ class PivotApp(App[None]):
             yield Static(f"{config.provider.name}  /  {config.provider.model}", id="runtime-meta")
         with Horizontal(id="body"):
             with Vertical(id="sessions-pane"):
-                yield Label("SESSIONS", classes="section-title")
+                yield Label("AGENTS" if self.agent_mode else "SESSIONS", classes="section-title")
                 yield ListView(id="session-list")
-                yield Button("New session", id="new-session")
+                if not self.agent_mode:
+                    yield Button("New session", id="new-session")
                 with Vertical(id="dependencies"):
                     yield Label("DEPENDENCIES", classes="section-title")
                     yield VerticalScroll(id="dependency-list")
@@ -607,10 +642,11 @@ class PivotApp(App[None]):
                     yield Button("Send", id="send", variant="primary")
                     yield Button("Stop", id="stop")
         with HorizontalScroll(id="shortcut-bar"):
-            yield Button("New (Ctrl+N)", id="shortcut-new", classes="shortcut-button")
-            yield Button("Older (Ctrl+←)", id="shortcut-older", classes="shortcut-button")
-            yield Button("Newer (Ctrl+→)", id="shortcut-newer", classes="shortcut-button")
-            yield Button("Sessions (Ctrl+B)", id="shortcut-sessions", classes="shortcut-button")
+            if not self.agent_mode:
+                yield Button("New (Ctrl+N)", id="shortcut-new", classes="shortcut-button")
+                yield Button("Older (Ctrl+←)", id="shortcut-older", classes="shortcut-button")
+                yield Button("Newer (Ctrl+→)", id="shortcut-newer", classes="shortcut-button")
+            yield Button("Agents (Ctrl+B)" if self.agent_mode else "Sessions (Ctrl+B)", id="shortcut-sessions", classes="shortcut-button")
             yield Button("Stop (Ctrl+G)", id="shortcut-stop", classes="shortcut-button")
             yield Button("Prompt (Ctrl+L)", id="shortcut-prompt", classes="shortcut-button")
             yield Button("Quit (Ctrl+Q)", id="shortcut-quit", classes="shortcut-button")
@@ -694,6 +730,12 @@ class PivotApp(App[None]):
             self.action_request_quit()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if self.agent_mode:
+            if isinstance(event.item, AgentItem):
+                snapshot = event.item.record.as_dict()
+                scope = ", ".join(snapshot["capabilities"] + snapshot["events"]) or "no assigned resources"
+                self.notify(f"{snapshot['name']}: {snapshot['state']} · {scope}")
+            return
         if isinstance(event.item, SessionItem) and event.item.session_id != self.current_session.session_id:
             await self._show_session(self.runtime.sessions.get(event.item.session_id))
 
@@ -706,7 +748,7 @@ class PivotApp(App[None]):
             return
         session_id = self.current_session.session_id
         if session_id in self.session_turns:
-            self.notify("This conversation is still working. Switch sessions to start another task.", severity="warning")
+            self.notify("The main agent is still working. Stop it before sending another request.", severity="warning")
             return
         editor = self.query_one("#prompt", PromptEditor)
         editor.text = ""
@@ -731,12 +773,19 @@ class PivotApp(App[None]):
                 LOGGER.debug("TUI closed before progress delivery session_id=%s", turn.session_id)
 
         try:
-            response = self.client.run(
-                turn.session_id,
-                turn.prompt,
-                progress=progress,
-                cancellation=turn.cancellation,
-            )
+            if self.agent_mode:
+                response = self.client.run_main(
+                    turn.prompt,
+                    progress=progress,
+                    cancellation=turn.cancellation,
+                )
+            else:
+                response = self.client.run(
+                    turn.session_id,
+                    turn.prompt,
+                    progress=progress,
+                    cancellation=turn.cancellation,
+                )
         except SessionCancelled:
             try:
                 self.call_from_thread(self._finish_turn, turn.turn_id, None, None, True)
@@ -824,10 +873,61 @@ class PivotApp(App[None]):
             )
             self._complete_step(turn, update.name or "event", state, _summarize(update.result))
             turn.status = "Reviewing event"
+        elif update.kind in {"executor_started", "control_started"}:
+            kind = "executor" if update.kind == "executor_started" else "control"
+            round_number = update.round_number or 1
+            self._complete_model_step(turn, round_number, f"{kind.title()} selected")
+            turn.steps.append(
+                WorkflowStep(
+                    kind,
+                    update.name or kind,
+                    update.name or kind,
+                    round_number,
+                    request=_summarize(update.result, limit=240),
+                )
+            )
+            turn.status = f"Running {update.name or kind}"
+        elif update.kind in {"executor_completed", "control_completed"}:
+            self._complete_step(turn, update.name or "action", "done", _summarize(update.result, limit=240))
+            turn.status = "Action result received"
+        elif update.kind in {"executor_failed", "control_failed"}:
+            self._complete_step(turn, update.name or "action", "failed", _summarize(update.result))
+            turn.status = "Recovering from action error"
+        elif update.kind == "agent_started":
+            agent = _agent_snapshot(update.result)
+            turn.steps.append(
+                WorkflowStep(
+                    "agent",
+                    agent.get("agent_id", update.name or "worker"),
+                    update.name or "worker",
+                    update.round_number or 1,
+                    request=_summarize({"task": agent.get("task"), "capabilities": agent.get("capabilities"), "events": agent.get("events")}, limit=240),
+                )
+            )
+            turn.status = f"Delegated to {update.name or 'worker'}"
+        elif update.kind == "agent_progress":
+            turn.status = f"{update.name or 'Worker'}: {update.message}"
+        elif update.kind in {"agent_completed", "agent_failed"}:
+            agent = _agent_snapshot(update.result)
+            self._complete_step(
+                turn,
+                agent.get("agent_id", update.name or "worker"),
+                "done" if update.kind == "agent_completed" else "failed",
+                _summarize(agent.get("report") or agent.get("error") or update.message, limit=240),
+            )
+            turn.status = "Worker report received" if update.kind == "agent_completed" else "Worker failed"
         elif update.kind == "turn_completed":
             self._complete_model_step(turn, update.round_number or 1, "Response ready")
         self._refresh_workflow(turn)
-        if update.kind in {"turn_started", "event_wait_started", "event_completed"}:
+        if update.kind in {
+            "turn_started",
+            "event_wait_started",
+            "event_completed",
+            "agent_started",
+            "agent_progress",
+            "agent_completed",
+            "agent_failed",
+        }:
             self._schedule_session_refresh()
 
     def _finish_turn(self, turn_id: str, response: str | None, error: str | None, interrupted: bool = False) -> None:
@@ -911,6 +1011,8 @@ class PivotApp(App[None]):
         return next((view for view in self.query(WorkflowView) if view.state.turn_id == turn.turn_id), None)
 
     async def _show_session(self, session: ConversationSession, *, focus_prompt: bool = True) -> None:
+        if self.agent_mode and self.runtime.agents is not None:
+            session = self.runtime.agents.main_agent
         self.client.select_session(session.session_id)
         self.current_session = session
         timeline = self.query_one("#timeline", VerticalScroll)
@@ -928,14 +1030,19 @@ class PivotApp(App[None]):
             config = self.runtime.config
             capabilities = len(self.runtime.registry.descriptors())
             events_count = len(self.runtime.events.descriptors())
+            introduction = (
+                "Talk to the main agent. It can solve the request directly or delegate scoped work to workers.\n\n"
+                if self.agent_mode
+                else "Start a conversation. Pivot can reason, inspect measurements, run capabilities, and wait for events.\n\n"
+            )
             welcome = (
-                "Start a conversation. Pivot can reason, inspect measurements, run capabilities, and wait for events.\n\n"
-                f"Provider  {config.provider.name}\n"
-                f"Model     {config.provider.model}\n"
-                f"Endpoint  {safe_endpoint(config.provider.api_base)}\n"
-                f"Tools     {capabilities} capabilities, {events_count} events"
+                introduction
+                + f"Provider  {config.provider.name}\n"
+                + f"Model     {config.provider.model}\n"
+                + f"Endpoint  {safe_endpoint(config.provider.api_base)}\n"
+                + f"Tools     {capabilities} capabilities, {events_count} events"
                 if self.show_welcome
-                else "Start a conversation."
+                else introduction.strip()
             )
             await timeline.mount(
                 Static(
@@ -951,6 +1058,14 @@ class PivotApp(App[None]):
             self.query_one("#prompt", PromptEditor).focus()
 
     async def _refresh_session_list(self) -> None:
+        if self.agent_mode and self.runtime.agents is not None:
+            view = self.query_one("#session-list", ListView)
+            await view.clear()
+            records = self.runtime.agents.records()
+            await view.extend(AgentItem(record) for record in records)
+            if records:
+                view.index = 0
+            return
         current_id = self.current_session.session_id
         known = list(self._session_ids)
         for session in self.runtime.sessions.sessions():
@@ -1004,6 +1119,8 @@ class PivotApp(App[None]):
             LOGGER.debug("TUI closed before dependency status delivery")
 
     def _discover_session_ids(self) -> list[str]:
+        if self.agent_mode and self.runtime.agents is not None:
+            return [self.runtime.agents.main_agent_id]
         current_id = self.current_session.session_id
         managed = [session.session_id for session in self.runtime.sessions.sessions()]
         persisted: list[tuple[float, str]] = []
@@ -1034,7 +1151,8 @@ class PivotApp(App[None]):
 
     def _update_header(self) -> None:
         session_id = self.current_session.session_id
-        self.query_one("#conversation-title", Static).update(f"Conversation  {session_id[:8]}")
+        title = "Main Agent" if self.agent_mode else f"Conversation  {session_id[:8]}"
+        self.query_one("#conversation-title", Static).update(title)
         turn_id = self.session_turns.get(session_id)
         state = self.turns[turn_id].status if turn_id else "Ready"
         self.query_one("#conversation-state", Static).update(state)
@@ -1046,25 +1164,32 @@ class PivotApp(App[None]):
         command = command.lower()
         if command in {"/exit", "/quit"}:
             self.action_request_quit()
-        elif command == "/new":
+        elif command == "/new" and not self.agent_mode:
             await self.action_new_session()
-        elif command in {"/next", "/n"}:
+        elif command in {"/next", "/n"} and not self.agent_mode:
             await self._cycle_session(-1)
-        elif command in {"/prev", "/previous", "/p"}:
+        elif command in {"/prev", "/previous", "/p"} and not self.agent_mode:
             await self._cycle_session(1)
         elif command in {"/stop", "/interrupt"}:
             self.action_interrupt_turn()
-        elif command in {"/sessions", "/sidebar"}:
+        elif command in {"/sessions", "/agents", "/sidebar"}:
             self.action_toggle_sessions()
         elif command == "/session":
-            await self._append_notice(f"Current conversation: {self.current_session.session_id}")
-        elif command == "/switch":
+            label = "Main agent" if self.agent_mode else "Current conversation"
+            await self._append_notice(f"{label}: {self.current_session.session_id}")
+        elif command == "/switch" and not self.agent_mode:
             await self._switch_session_prefix(argument.strip())
         elif command == "/help":
-            await self._append_notice(
-                "Commands: /new, /next, /prev, /switch <id>, /session, /sessions, /stop, /help, /exit\n"
-                "Keys: Ctrl+N new, Ctrl+Left/Right navigate sessions, Ctrl+G stop, Ctrl+B sessions, Ctrl+L prompt, Ctrl+Q quit"
-            )
+            if self.agent_mode:
+                await self._append_notice(
+                    "Commands: /agents, /session, /stop, /help, /exit\n"
+                    "Keys: Ctrl+G stop, Ctrl+B agents, Ctrl+L prompt, Ctrl+Q quit"
+                )
+            else:
+                await self._append_notice(
+                    "Commands: /new, /next, /prev, /switch <id>, /session, /sessions, /stop, /help, /exit\n"
+                    "Keys: Ctrl+N new, Ctrl+Left/Right navigate sessions, Ctrl+G stop, Ctrl+B sessions, Ctrl+L prompt, Ctrl+Q quit"
+                )
         else:
             await self._append_notice(f"Unknown command: {command}. Enter /help for available commands.", error=True)
         self.query_one("#prompt", PromptEditor).focus()
@@ -1098,17 +1223,26 @@ class PivotApp(App[None]):
         self._focus_current_session_item()
 
     async def action_new_session(self) -> None:
+        if self.agent_mode:
+            self.notify("The main agent owns the user conversation; it creates workers when needed.")
+            return
         session = self.client.create_session()
         self._session_ids.insert(0, session.session_id)
         await self._show_session(session)
 
     async def action_previous_session(self) -> None:
+        if self.agent_mode:
+            self._focus_current_session_item()
+            return
         if not self._session_list_has_focus():
             self._focus_current_session_item()
             return
         await self._cycle_session(1)
 
     async def action_next_session(self) -> None:
+        if self.agent_mode:
+            self._focus_current_session_item()
+            return
         if not self._session_list_has_focus():
             self._focus_current_session_item()
             return
@@ -1214,6 +1348,12 @@ def _event_name(value: Any) -> str:
     return "event"
 
 
+def _agent_snapshot(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and isinstance(value.get("agent"), dict):
+        return dict(value["agent"])
+    return {}
+
+
 def _is_uuid(value: str) -> bool:
     try:
         return str(UUID(value)) == value
@@ -1221,4 +1361,4 @@ def _is_uuid(value: str) -> bool:
         return False
 
 
-__all__ = ["PivotApp", "PromptEditor", "run_tui"]
+__all__ = ["AgentItem", "PivotApp", "PromptEditor", "run_tui"]

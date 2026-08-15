@@ -14,7 +14,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from .models import Message, ToolCall
+from .models import Message, ToolCall, normalize_content
 from .session import CancellationToken, ConversationSession, ProgressCallback, SessionCancelled
 
 if TYPE_CHECKING:
@@ -102,7 +102,9 @@ class PivotControl:
         self._tasks: OrderedDict[str, ControlTask] = OrderedDict()
         self._listeners: set[ControlListener] = set()
         self._active_cancellations: dict[str, set[CancellationToken]] = {}
-        self._selected_session_id = selected_session.session_id if selected_session else None
+        main_agent = runtime.agents.main_agent if runtime.agents is not None else None
+        initial_session = selected_session or main_agent
+        self._selected_session_id = initial_session.session_id if initial_session else None
         self._lock = threading.RLock()
         self._closed = False
         self._register_builtin_operations()
@@ -145,7 +147,7 @@ class PivotControl:
             return tuple(self._operations[name] for name in sorted(self._operations))
 
     def create_session(self, *, select: bool = True) -> ConversationSession:
-        session = self.runtime.sessions.create()
+        session = self.runtime.agents.main_agent if self.runtime.agents is not None else self.runtime.sessions.create()
         if select:
             self.select_session(session.session_id)
         self._emit("session_created", self.session_snapshot(session.session_id))
@@ -153,6 +155,11 @@ class PivotControl:
 
     def get_session(self, session_id: str | None = None) -> ConversationSession:
         resolved = session_id or self.selected_session_id
+        if self.runtime.agents is not None:
+            main_agent = self.runtime.agents.main_agent
+            if resolved is None or resolved == main_agent.session_id:
+                return main_agent
+            raise ControlError("User messages can only target the main agent")
         if not resolved:
             raise ControlError("No conversation is selected")
         try:
@@ -170,6 +177,8 @@ class PivotControl:
         return session
 
     def sessions(self) -> tuple[ConversationSession, ...]:
+        if self.runtime.agents is not None:
+            return (self.runtime.agents.main_agent,)
         return self.runtime.sessions.available_sessions()
 
     def session_snapshot(self, session_id: str | None = None) -> dict[str, Any]:
@@ -323,6 +332,9 @@ class PivotControl:
             "selected_session_id": self.selected_session_id,
             "capabilities": len(self.runtime.registry.descriptors()),
             "events": len(self.runtime.events.descriptors()),
+            "executors": len(self.runtime.executors.descriptors()) if self.runtime.executors else 0,
+            "agents": len(self.runtime.agents.records()) if self.runtime.agents else 0,
+            "main_agent_id": self.runtime.agents.main_agent_id if self.runtime.agents else None,
             "dependencies": len(self.runtime.dependencies.descriptors()) if self.runtime.dependencies else 0,
         }
 
@@ -438,6 +450,14 @@ class PivotControl:
         self.register_operation("capability.execute", self._op_execute_capability, description="Execute a registered capability.")
         self.register_operation("event.list", self._op_list_events, description="List available event sources.")
         self.register_operation("event.wait", self._op_wait_event, description="Wait for an event condition.")
+        self.register_operation("executor.list", self._op_list_executors, description="List execution backends.")
+        self.register_operation("executor.execute", self._op_execute_executor, description="Execute one backend request.")
+        if self.runtime.agents is not None:
+            self.register_operation("agent.list", self._op_list_agents, description="List the main and delegated agents.")
+            self.register_operation("agent.get", self._op_get_agent, description="Read one agent state and report.")
+            self.register_operation("agent.create", self._op_create_agent, description="Create a scoped worker agent.")
+            self.register_operation("agent.assign", self._op_assign_agent, description="Assign a task to a worker agent.")
+            self.register_operation("agent.delegate", self._op_delegate_agent, description="Create and run a scoped worker agent.")
         self.register_operation("dependency.list", self._op_list_dependencies, description="List dependency status.")
         self.register_operation("dependency.refresh", self._op_refresh_dependencies, description="Refresh dependency status.")
         self.register_operation("dependency.start", self._op_start_dependency, description="Start one dependency.")
@@ -460,7 +480,12 @@ class PivotControl:
 
     def _op_send(self, arguments: Mapping[str, Any], cancellation: CancellationToken) -> dict[str, Any]:
         session = self.get_session(_optional_session_id(arguments))
-        message = _required_string(arguments, "message")
+        if "message" not in arguments:
+            raise ControlError("message is required")
+        try:
+            message = normalize_content(arguments["message"])
+        except (TypeError, ValueError) as exc:
+            raise ControlError(f"message is invalid: {exc}") from exc
         response = self.run(session.session_id, message, cancellation=cancellation)
         return {"session_id": session.session_id, "response": response}
 
@@ -496,6 +521,39 @@ class PivotControl:
             is_cancelled=cancellation.is_cancelled,
         )
         return notification.as_dict()
+
+    def _op_list_executors(self, _arguments: Mapping[str, Any], _cancel: CancellationToken) -> list[dict[str, Any]]:
+        return [item.as_prompt_dict() for item in self.runtime.executors.descriptors()] if self.runtime.executors else []
+
+    def _op_execute_executor(self, arguments: Mapping[str, Any], _cancel: CancellationToken) -> Any:
+        if self.runtime.executors is None:
+            raise ControlError("Executor service is not available")
+        name = _required_string(arguments, "name")
+        values = arguments.get("arguments", {})
+        if not isinstance(values, Mapping):
+            raise ControlError("executor.execute arguments must be an object")
+        return self.runtime.executors.execute(name, values)
+
+    def _op_list_agents(self, _arguments: Mapping[str, Any], _cancel: CancellationToken) -> list[dict[str, Any]]:
+        agents = self._agent_control()
+        return [item.as_dict() for item in agents.records()]
+
+    def _op_get_agent(self, arguments: Mapping[str, Any], _cancel: CancellationToken) -> dict[str, Any]:
+        return self._agent_control().get(_required_string(arguments, "agent_id")).as_dict()
+
+    def _op_create_agent(self, arguments: Mapping[str, Any], cancellation: CancellationToken) -> Any:
+        return self._agent_control().invoke_main("agent.create", arguments, cancellation=cancellation)
+
+    def _op_assign_agent(self, arguments: Mapping[str, Any], cancellation: CancellationToken) -> Any:
+        return self._agent_control().invoke_main("agent.assign", arguments, cancellation=cancellation)
+
+    def _op_delegate_agent(self, arguments: Mapping[str, Any], cancellation: CancellationToken) -> Any:
+        return self._agent_control().invoke_main("agent.delegate", arguments, cancellation=cancellation)
+
+    def _agent_control(self) -> Any:
+        if self.runtime.agents is None:
+            raise ControlError("Agent control service is not available")
+        return self.runtime.agents
 
     def _op_shutdown(self, _arguments: Mapping[str, Any], _cancel: CancellationToken) -> dict[str, bool]:
         self.request_shutdown()

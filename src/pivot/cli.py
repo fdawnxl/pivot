@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pivot", description="Run a pivot agent conversation")
     parser.add_argument("--instance", help="Path to the pivot instance (or set PIVOT_INSTANCE_PATH)")
-    parser.add_argument("--session", help="Conversation UUID to resume; omitted creates a new conversation")
+    parser.add_argument("--session", help=argparse.SUPPRESS)
     parser.add_argument("--no-banner", action="store_true", help="Suppress the startup logo and runtime summary")
     parser.add_argument("--no-dbus", action="store_true", help="Do not export the pivot D-Bus control interface")
     parser.add_argument("--dbus-only", action="store_true", help="Run only the D-Bus control service until interrupted")
@@ -55,7 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         client = PivotClient(build_runtime(PivotConfig.load(instance_path=args.instance)))
         runtime = client.runtime
-        session = runtime.sessions.get(args.session) if args.session else runtime.sessions.create()
+        session = client.main_agent()
+        if args.session and args.session != session.session_id:
+            raise ConfigurationError("Manual conversation selection was removed; messages always target the main agent")
         client.select_session(session.session_id)
         dbus_required = args.dbus_only
         if runtime.config.dbus_control_enabled and not args.no_dbus:
@@ -83,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         message = args.message if args.message is not None else sys.stdin.read().strip()
         if not message.strip():
             raise ConfigurationError("A message argument or stdin input is required")
-        response = client.run(session.session_id, message)
+        response = client.run_main(message)
         LOGGER.info("CLI request completed session_id=%s", session.session_id)
         sys.stdout.write(response + "\n")
         return 0
