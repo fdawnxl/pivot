@@ -374,8 +374,14 @@ class EventService:
         self.max_wait = max_wait
         self.sleeper = sleeper
 
-    def llm_tools(self) -> tuple[dict[str, Any], ...]:
-        if not self.pool.descriptors():
+    def llm_tools(self, event_names: tuple[str, ...] | None = None) -> tuple[dict[str, Any], ...]:
+        """Return the event wait tool limited to an agent's assigned event names."""
+
+        descriptors = self.pool.descriptors()
+        if event_names is not None:
+            allowed = set(event_names)
+            descriptors = tuple(item for item in descriptors if item.name in allowed)
+        if not descriptors:
             return ()
         return (
             {
@@ -386,8 +392,11 @@ class EventService:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "event": {"type": "string", "enum": [item.name for item in self.pool.descriptors()]},
-                            "operator": {"type": "string", "enum": sorted(OPERATORS)},
+                            "event": {"type": "string", "enum": [item.name for item in descriptors]},
+                            "operator": {
+                                "type": "string",
+                                "enum": sorted({operator for item in descriptors for operator in item.operators}),
+                            },
                             "expected": {},
                             "timeout": {"type": "number", "exclusiveMinimum": 0, "maximum": self.max_wait},
                         },

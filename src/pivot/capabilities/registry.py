@@ -213,6 +213,25 @@ class CapabilityRegistry:
             for item in self.descriptors()
         ]
 
+    def scoped(self, names: list[str] | tuple[str, ...]) -> "CapabilityRegistry":
+        """Return an independent registry exposing only explicitly assigned capabilities."""
+
+        requested = tuple(dict.fromkeys(names))
+        unknown = sorted(set(requested) - self._descriptors.keys())
+        if unknown:
+            raise CapabilityError(f"Unknown assigned capabilities: {', '.join(unknown)}")
+        scoped = CapabilityRegistry()
+        for name in requested:
+            descriptor = self._descriptors[name]
+            if descriptor.kind == "think":
+                reader = self._think_readers.get(name)
+                if reader is None:
+                    raise CapabilityError(f"Think capability has no reader: {name}")
+                scoped.register_think(descriptor, reader)
+            else:
+                scoped.register(descriptor, self._handlers[name])
+        return scoped
+
     def execute(self, call: ToolCall) -> Any:
         if call.name == THINK_READER_NAME:
             return self._read_think(call.arguments)

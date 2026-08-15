@@ -45,6 +45,8 @@ class PivotConfig:
     max_rounds: int = 8
     llm_timeout: float = 120.0
     capability_timeout: float = 15.0
+    executor_timeout: float = 30.0
+    executor_max_output_bytes: int = 1024 * 1024
     event_poll_interval: float = 1.0
     event_max_wait: float = 3600.0
     dependency_install_timeout: float = 300.0
@@ -110,6 +112,8 @@ class PivotConfig:
             max_rounds=get("max_rounds", 8, int),
             llm_timeout=get("llm_timeout", 120.0, float),
             capability_timeout=get("capability_timeout", 15.0, float),
+            executor_timeout=get("executor_timeout", 30.0, float),
+            executor_max_output_bytes=get("executor_max_output_bytes", 1024 * 1024, int),
             event_poll_interval=get("event_poll_interval", 1.0, float),
             event_max_wait=get("event_max_wait", 3600.0, float),
             dependency_install_timeout=get("dependency_install_timeout", 300.0, float),
@@ -127,6 +131,8 @@ class PivotConfig:
             config.max_rounds < 1
             or config.llm_timeout <= 0
             or config.capability_timeout <= 0
+            or config.executor_timeout <= 0
+            or config.executor_max_output_bytes < 1
             or config.event_poll_interval <= 0
             or config.event_max_wait <= 0
             or config.dependency_install_timeout <= 0

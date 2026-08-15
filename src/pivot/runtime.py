@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
+from .agents import AgentControl
 from .capabilities import CapabilityRegistry
 from .capabilities.discovery import register_instance_capabilities
 from .config import PivotConfig
 from .dependencies import DependencyManager
 from .events import EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
+from .executors import ExecutorRegistry, ShellExecutor
 from .llm import LiteLLMClient
 from .memory import TextMemory
 from .session import CancellationToken, ConversationSession, ProgressCallback, SessionManager
@@ -28,6 +31,8 @@ class Runtime:
     event_service: EventService
     sessions: SessionManager
     dependencies: DependencyManager | None = None
+    executors: ExecutorRegistry | None = None
+    agents: AgentControl | None = None
 
     def close(self) -> None:
         """Release runtime-owned external processes."""
@@ -73,26 +78,49 @@ def build_runtime(config: PivotConfig) -> Runtime:
             poll_interval=config.event_poll_interval,
             max_wait=config.event_max_wait,
         )
+        llm = LiteLLMClient(
+            config.provider.model,
+            api_base=config.provider.api_base,
+            api_key=config.provider.api_key,
+            timeout=config.llm_timeout,
+        )
+        executors = ExecutorRegistry()
+        executors.register(
+            ShellExecutor(
+                config.instance_path,
+                timeout=config.executor_timeout,
+                max_output_bytes=config.executor_max_output_bytes,
+            )
+        )
         manager = SessionManager(
-            llm=LiteLLMClient(
-                config.provider.model,
-                api_base=config.provider.api_base,
-                api_key=config.provider.api_key,
-                timeout=config.llm_timeout,
-            ),
+            llm=llm,
             capabilities=registry,
             memory=TextMemory(config.instance_path / "memory"),
             events=event_pool,
             event_service=event_service,
+            executors=executors,
+            max_rounds=config.max_rounds,
+        )
+        main_agent_id = str(uuid5(NAMESPACE_URL, f"pivot-main-agent:{config.instance_path}"))
+        main_agent = manager.get(main_agent_id)
+        agents = AgentControl(
+            main_agent,
+            llm=llm,
+            capabilities=registry,
+            child_memory=TextMemory(config.instance_path / "memory" / "agents"),
+            events=event_pool,
+            event_service=event_service,
+            executors=executors,
             max_rounds=config.max_rounds,
         )
         LOGGER.info(
-            "Runtime assembly completed dependencies=%d capabilities=%d events=%d",
+            "Runtime assembly completed dependencies=%d capabilities=%d events=%d executors=%d",
             len(dependencies.descriptors()),
             len(registry.descriptors()),
             len(event_pool.descriptors()),
+            len(executors.descriptors()),
         )
-        return Runtime(config, registry, event_pool, event_service, manager, dependencies)
+        return Runtime(config, registry, event_pool, event_service, manager, dependencies, executors, agents)
     except BaseException:
         dependencies.close()
         raise
@@ -115,9 +143,17 @@ class PivotClient:
         return cls(build_runtime(PivotConfig.load(instance_path=instance_path)))
 
     def create_session(self) -> ConversationSession:
-        """Create a new isolated conversation."""
+        """Return the sole user-facing main agent conversation."""
 
         return self.control.create_session()
+
+    def main_agent(self) -> ConversationSession:
+        """Return the sole user-facing main agent."""
+
+        if self.runtime.agents is not None:
+            return self.runtime.agents.main_agent
+        sessions = self.control.sessions()
+        return sessions[0] if sessions else self.control.create_session()
 
     def get_session(self, session_id: str) -> ConversationSession:
         """Load or create a canonical UUID conversation."""
@@ -140,6 +176,17 @@ class PivotClient:
         """Run one conversation turn without involving terminal UI code."""
 
         return self.control.run(session_id, user_input, progress=progress, cancellation=cancellation)
+
+    def run_main(
+        self,
+        user_input: Any,
+        *,
+        progress: ProgressCallback | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> str:
+        """Run one turn through the main agent."""
+
+        return self.control.run(self.main_agent().session_id, user_input, progress=progress, cancellation=cancellation)
 
     def sessions(self) -> tuple[ConversationSession, ...]:
         """List sessions currently managed by this client."""
