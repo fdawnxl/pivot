@@ -37,7 +37,7 @@ CancelSession(session_id: s)                -> b
 RequestShutdown()                           -> b
 ```
 
-An empty `session_id` means the selected conversation. `SelectSession` also updates a running TUI. `CancelSession` interrupts work started through D-Bus or through the local `PivotClient` at the next cooperative session boundary.
+An empty `session_id` means the main agent. In the default runtime, creation and selection compatibility methods resolve to that same main agent; another UUID is rejected. `CancelSession` interrupts main-agent work and its active delegated worker at the next cooperative boundary.
 
 ## Extensible operations
 
@@ -63,6 +63,13 @@ capability.list
 capability.execute
 event.list
 event.wait
+executor.list
+executor.execute
+agent.list
+agent.get
+agent.create
+agent.assign
+agent.delegate
 dependency.list
 dependency.refresh
 dependency.start

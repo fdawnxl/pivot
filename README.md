@@ -12,15 +12,11 @@ PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot
 PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot "Hello"
 ```
 
-The interactive CLI is a Textual application with a persistent prompt, Markdown conversation timeline, responsive session sidebar, and inspectable agent trace. Each trace groups model analysis phases, model-provided decision summaries, capability arguments and results, event waits, and result-integration rounds without exposing hidden chain-of-thought. Agent turns run in background workers, so another conversation can be opened while one is working.
+The interactive CLI is a Textual application centered on one persistent main agent. The user always talks to that main agent; it either solves the request directly or creates a worker with an explicit capability and event scope. The agent sidebar shows delegated workers and their lifecycle without turning them into user-selectable conversations. Each trace groups model phases, capability calls, event waits, executor calls, control operations, worker reports, and result-integration rounds without exposing hidden chain-of-thought.
 
-While a CLI process is running, pivot also attempts to export the same application control surface on the session D-Bus as `org.pivot.Control` at `/org/pivot/Control`. Remote clients can create or select conversations, list and read history, send messages asynchronously, interrupt work, inspect capabilities/events/dependencies, invoke extensible control operations, and request shutdown. The CLI and TUI continue to call local Python methods directly if D-Bus is unavailable. Run a headless control process with `uv run pivot --dbus-only`, or disable export with `--no-dbus`. See [the control protocol](doc/control-dbus.md).
+While a CLI process is running, pivot also attempts to export the same application control surface on the session D-Bus as `org.pivot.Control` at `/org/pivot/Control`. Remote clients can send work to the main agent, inspect agent/capability/event/executor/dependency state, manage delegated workers, interrupt work, invoke extensible operations, and request shutdown. The CLI and TUI continue to call local Python methods directly if D-Bus is unavailable. Run a headless control process with `uv run pivot --dbus-only`, or disable export with `--no-dbus`. See [the control protocol](doc/control-dbus.md).
 
-Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+N` for a new conversation, `Ctrl+Left`/`Ctrl+Right` to enter the session sidebar and navigate older or newer conversations, `Ctrl+B` to toggle the sidebar, `Ctrl+G` to interrupt the selected conversation, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The bottom shortcut bar shows these common actions and is also clickable. The prompt accepts `/new`, `/next`, `/prev`, `/switch <id-prefix>`, `/session`, `/sessions`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits stop during polling, while a synchronous model or capability request stops at its next safe boundary. The same runtime is also available through `pivot.PivotClient` for services and other clients that do not use the terminal UI. Resume an existing conversation with:
-
-```bash
-PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot --session 4b3c9f24-582c-42b1-bf25-f24a6f907f67
-```
+Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+B` to toggle the agent sidebar, `Ctrl+G` to interrupt the main agent and its active worker, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The prompt accepts `/agents`, `/session`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits and delegated workers stop during safe polling boundaries, while a synchronous model, capability, or executor request stops at its next safe boundary. The same runtime is available through `pivot.PivotClient.run_main` for non-terminal clients.
 
 The TUI shows the selected provider, model, conversation, capabilities, events, and live dependency health without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
@@ -33,7 +29,8 @@ instance/
 ├── environment/{think,measure,work,event}/
 ├── events/
 ├── logs/pivot.log
-├── memory/<conversation-uuid>/history.jsonl
+├── memory/<main-agent-uuid>/history.jsonl
+├── memory/agents/<worker-uuid>/history.jsonl
 ├── config.toml
 └── credentials.toml        # named LLM providers, mode 0600
 ```
@@ -64,6 +61,8 @@ api_key = "provider-secret"
 ```toml
 provider = "local"
 max_rounds = 8
+executor_timeout = 30
+executor_max_output_bytes = 1048576
 dbus_control_enabled = true
 dbus_control_bus = "session"
 dbus_control_service = "org.pivot.Control"
@@ -83,7 +82,11 @@ The corresponding environment variables are `PIVOT_LOG_DISPLAY_LEVEL` and `PIVOT
 
 ## Architecture
 
-`pivot.config` bootstraps an instance; `pivot.logging` configures terminal and rotating-file output; `pivot.dependencies` installs, starts, checks, and stops external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts text and tool calls; `pivot.capabilities` validates and dispatches `think`, `measure` and `work` capabilities; `pivot.events` owns event definitions and FIFO waiters; `pivot.memory` writes UUID-isolated transcripts atomically; `pivot.session` runs the bounded conversation loop; and `pivot.orchestrator` runs independent agents concurrently.
+`pivot.config` bootstraps an instance; `pivot.logging` configures terminal and rotating-file output; `pivot.dependencies` manages external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts provider responses; `pivot.actions` normalizes every model action; `pivot.capabilities` dispatches `think`, `measure` and `work`; `pivot.executors` performs concrete execution; `pivot.events` owns event waits; `pivot.agents` owns main/worker control; `pivot.memory` persists transcripts; and `pivot.session` runs the bounded conversation loop.
+
+The preferred model operation is the single `pivot_action` tool with `{kind, name, arguments}`. The same detector accepts a textual fallback in the form `<pivot-action>{JSON}</pivot-action>`. Capability calls, event waits, framework control, and executor requests all pass through this normalized route. Existing provider-native capability and event tool calls remain compatible. See [agent control, actions, and executors](doc/agent-control.md) for the operation contract.
+
+The built-in `shell` executor runs through `/bin/sh` in the explicit instance directory with a restricted environment, configured timeout, and bounded stdout/stderr. It is an execution mechanism rather than a work methodology. It does not provide an operating-system security sandbox.
 
 Instance capability scripts are never imported by the pivot process. They use dedicated uv environments and JSON command protocols:
 
