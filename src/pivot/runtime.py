@@ -15,6 +15,7 @@ from .dependencies import DependencyManager
 from .events import EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
 from .executors import ExecutorRegistry, ShellExecutor
 from .llm import LiteLLMClient
+from .lease import RuntimeLease
 from .memory import TextMemory
 from .session import CancellationToken, ConversationSession, ProgressCallback, SessionManager
 
@@ -33,17 +34,22 @@ class Runtime:
     dependencies: DependencyManager | None = None
     executors: ExecutorRegistry | None = None
     agents: AgentControl | None = None
+    lease: RuntimeLease | None = None
 
     def close(self) -> None:
         """Release runtime-owned external processes."""
 
         if self.dependencies is not None:
             self.dependencies.close()
+        if self.lease is not None:
+            self.lease.release()
 
 
 def build_runtime(config: PivotConfig) -> Runtime:
     """Build capability, event, LLM, memory, and session services."""
 
+    lease = RuntimeLease(config.instance_path)
+    lease.acquire()
     dependencies = DependencyManager(
         config.instance_path,
         install_timeout=config.dependency_install_timeout,
@@ -120,9 +126,10 @@ def build_runtime(config: PivotConfig) -> Runtime:
             len(event_pool.descriptors()),
             len(executors.descriptors()),
         )
-        return Runtime(config, registry, event_pool, event_service, manager, dependencies, executors, agents)
+        return Runtime(config, registry, event_pool, event_service, manager, dependencies, executors, agents, lease)
     except BaseException:
         dependencies.close()
+        lease.release()
         raise
 
 

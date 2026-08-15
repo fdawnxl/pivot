@@ -2,6 +2,8 @@
 
 The runtime follows a one-way dependency flow from models/configuration to adapters and then to orchestration. Provider responses are converted at the boundary, so session code never imports LiteLLM types. `ActionDetector` then normalizes native tool calls and fixed-format `<pivot-action>{JSON}</pivot-action>` output into capability, event, control, or executor actions before the session routes them. Instance scripts are optional runtime extensions: one broken script is logged and skipped while the rest of the instance remains usable.
 
+Runtime assembly first acquires an exclusive process lease in the resolved instance. Only one process may own dependency lifecycle, the main agent, and writable runtime state for an instance at a time; a competing process fails before it starts dependencies. The lease is released during orderly shutdown and failed assembly.
+
 Each instance owns one stable main-agent UUID. User-facing clients always submit to that agent and cannot select worker histories. `AgentControl` lets the main agent create a worker, assign an explicit subset of capabilities and events, submit a task, observe progress, and receive a structured report. Workers retain isolated histories under `memory/agents/<uuid>` and can see only themselves and the main agent through control. The combined `agent.delegate` operation performs create, assign, wait, and report in one bounded model action.
 
 Capabilities describe or provide domain work, while executors perform concrete machine actions. The initial `shell` executor uses a fixed instance cwd, a restricted inherited environment, a maximum timeout, and bounded output. This boundary is injectable and observable, but it remains process control rather than an operating-system sandbox.

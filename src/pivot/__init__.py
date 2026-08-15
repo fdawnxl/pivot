@@ -7,6 +7,7 @@ from .control import ControlError, ControlTaskState, PivotControl
 from .dbus_control import ControlDBusService
 from .dependencies import DependencyDBus, DependencyManager, DependencyState, DependencyStatus
 from .executors import ExecutorDescriptor, ExecutorError, ExecutorRegistry, ShellExecutor
+from .lease import RuntimeLeaseError
 from .runtime import PivotClient, Runtime, build_runtime
 from .session import CancellationToken, SessionCancelled, SessionState
 
@@ -35,6 +36,7 @@ __all__ = [
     "PivotConfig",
     "PivotControl",
     "Runtime",
+    "RuntimeLeaseError",
     "SessionCancelled",
     "SessionState",
     "ShellExecutor",
