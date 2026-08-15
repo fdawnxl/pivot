@@ -29,6 +29,7 @@ class ActionKind(StrEnum):
     EVENT = "event"
     CONTROL = "control"
     EXECUTOR = "executor"
+    MEMORY = "memory"
 
 
 _ACTION_KIND_ALIASES = {
@@ -67,7 +68,7 @@ def action_tool() -> dict[str, Any]:
             "name": ACTION_TOOL,
             "description": (
                 "Perform one pivot framework action. Use this for capabilities, event waits, "
-                "agent control, and command executors. For think, measure, and work capabilities, "
+                "agent control, command executors, and durable memory. For think, measure, and work capabilities, "
                 "kind must be capability."
             ),
             "parameters": {

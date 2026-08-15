@@ -1,6 +1,7 @@
 """pivot: a layered agent framework for edge and embodied systems."""
 
 from .actions import ACTION_TOOL, ActionDetector, ActionKind, ActionRequest
+from .activation import AgentCancelled, ActivationState, CancellationToken, PersistentAgent
 from .agents import AgentControl, AgentControlError, AgentRecord, AgentRole, AgentState
 from .config import PivotConfig
 from .control import ControlError, ControlTaskState, PivotControl
@@ -9,7 +10,6 @@ from .dependencies import DependencyDBus, DependencyManager, DependencyState, De
 from .executors import ExecutorDescriptor, ExecutorError, ExecutorRegistry, ShellExecutor
 from .lease import RuntimeLeaseError
 from .runtime import PivotClient, Runtime, build_runtime
-from .session import CancellationToken, SessionCancelled, SessionState
 
 __all__ = [
     "ACTION_TOOL",
@@ -21,6 +21,8 @@ __all__ = [
     "AgentRecord",
     "AgentRole",
     "AgentState",
+    "AgentCancelled",
+    "ActivationState",
     "CancellationToken",
     "ControlDBusService",
     "ControlError",
@@ -37,8 +39,7 @@ __all__ = [
     "PivotControl",
     "Runtime",
     "RuntimeLeaseError",
-    "SessionCancelled",
-    "SessionState",
+    "PersistentAgent",
     "ShellExecutor",
     "build_runtime",
 ]

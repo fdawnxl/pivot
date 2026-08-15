@@ -33,13 +33,14 @@ def test_logging_uses_independent_console_and_file_levels(tmp_path: Path) -> Non
 def test_structured_logging_includes_correlation_context(tmp_path: Path) -> None:
     log_path = tmp_path / "pivot.log"
     configure_logging("error", file_level="info", log_path=log_path, stream=StringIO())
-    with log_context(correlation_id="request-1", session_id="session-1"):
+    with log_context(correlation_id="request-1", activation_id="activation-1", agent_id="agent-1"):
         logging.getLogger("pivot.test").info("correlated operation", extra={"capability": "cpu_read"})
     for handler in logging.getLogger().handlers:
         handler.flush()
     record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
     assert record["correlation_id"] == "request-1"
-    assert record["session_id"] == "session-1"
+    assert record["activation_id"] == "activation-1"
+    assert record["agent_id"] == "agent-1"
     assert record["capability"] == "cpu_read"
 
 

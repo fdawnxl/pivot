@@ -6,7 +6,7 @@ import threading
 from collections.abc import Callable
 from typing import TypeVar
 
-from .session import CancellationToken, SessionCancelled
+from .activation import AgentCancelled, CancellationToken
 
 T = TypeVar("T")
 
@@ -42,11 +42,11 @@ class MainAgentMailbox:
             while sequence > self._next:
                 if cancellation.is_cancelled():
                     self._skip_locked(sequence)
-                    raise SessionCancelled("Main-agent request was cancelled while queued")
+                    raise AgentCancelled("Main-agent request was cancelled while queued")
                 self._condition.wait(timeout=0.05)
             if sequence < self._next or cancellation.is_cancelled():
                 self._skip_locked(sequence)
-                raise SessionCancelled("Main-agent request was cancelled while queued")
+                raise AgentCancelled("Main-agent request was cancelled while queued")
         try:
             if on_started is not None:
                 on_started()

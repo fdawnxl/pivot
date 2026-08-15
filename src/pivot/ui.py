@@ -24,7 +24,7 @@ class RuntimeSummary:
     provider: str
     model: str
     endpoint: str
-    session_id: str
+    agent_id: str
     capabilities: tuple[CapabilityDescriptor, ...]
     events: tuple[EventDescriptor, ...]
 
@@ -58,7 +58,7 @@ def render_banner(summary: RuntimeSummary) -> str:
                 f"Provider     : {summary.provider}",
                 f"Model        : {summary.model}",
                 f"Endpoint     : {summary.endpoint}",
-                f"Conversation : {summary.session_id}",
+                f"Main Agent  : {summary.agent_id}",
                 f"Capabilities : {capabilities}",
                 f"Events       : {events}",
             )

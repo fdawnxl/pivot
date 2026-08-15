@@ -62,7 +62,7 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("correlation_id", "session_id", "agent_id", "capability", "event"):
+        for key in ("correlation_id", "activation_id", "agent_id", "capability", "event"):
             value = getattr(record, key, None)
             if value is not None:
                 document[key] = value
@@ -71,7 +71,7 @@ class JsonFormatter(logging.Formatter):
             for key, value in record.__dict__.items()
             if key not in _STANDARD_RECORD_FIELDS
             and key not in document
-            and key not in {"correlation_id", "session_id", "agent_id", "capability", "event"}
+            and key not in {"correlation_id", "activation_id", "agent_id", "capability", "event"}
             and isinstance(value, (str, int, float, bool, type(None)))
         }
         if extras:

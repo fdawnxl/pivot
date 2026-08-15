@@ -19,7 +19,7 @@ class LLMError(RuntimeError):
 
 class LLMClient(Protocol):
     def complete(self, messages: Sequence[Message], *, tools: Sequence[dict[str, Any]] = ()) -> Any:
-        """Return a provider response for the supplied conversation."""
+        """Return a provider response for the supplied message sequence."""
 
 
 class LiteLLMClient:

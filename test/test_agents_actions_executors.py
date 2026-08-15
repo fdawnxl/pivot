@@ -4,21 +4,19 @@ import json
 import threading
 import time
 from pathlib import Path
-from uuid import uuid4
-
 import pytest
 
 from pivot.actions import ACTION_TOOL, ActionDetector, ActionKind
+from pivot.activation import PersistentAgent
 from pivot.agents import AgentControl, AgentControlError
 from pivot.capabilities import CapabilityRegistry
 from pivot.config import PivotConfig
 from pivot.credentials import ProviderCredential
 from pivot.events import EventDescriptor, EventPool, EventService, EventSupervisor
 from pivot.executors import ExecutorError, ExecutorRegistry, ShellExecutor
-from pivot.memory import TextMemory
+from pivot.memory import MemoryStore
 from pivot.models import CapabilityDescriptor, ParsedResponse, ToolCall
 from pivot.runtime import PivotClient, Runtime
-from pivot.session import ConversationSession, SessionManager
 
 
 def test_action_detector_normalizes_fixed_text_protocol() -> None:
@@ -68,7 +66,7 @@ def test_shell_executor_uses_instance_cwd_and_controlled_output(tmp_path: Path) 
         executor.execute({"command": "true", "timeout": 3})
 
 
-def test_fixed_text_action_executes_through_session_router(tmp_path: Path) -> None:
+def test_fixed_text_action_executes_through_agent_router(tmp_path: Path) -> None:
     class TextActionLLM:
         def complete(self, messages, *, tools=()):
             if not any(message.role == "tool" for message in messages):
@@ -83,16 +81,19 @@ def test_fixed_text_action_executes_through_session_router(tmp_path: Path) -> No
 
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    session = ConversationSession(
-        str(uuid4()),
+    memory = MemoryStore(tmp_path / "memory")
+    agent = PersistentAgent(
+        memory.main_agent_id(),
         llm=TextActionLLM(),
         capabilities=CapabilityRegistry(),
+        memory=memory,
         executors=executors,
     )
 
-    assert session.run("run it") == "Execution was routed."
-    assert session.history[2].content == ""
-    assert session.history[2].tool_calls[0].name == ACTION_TOOL
+    assert agent.activate("run it") == "Execution was routed."
+    assert agent.history[1].content == ""
+    assert agent.history[1].tool_calls[0].name == ACTION_TOOL
+    memory.close()
 
 
 class DelegatingLLM:
@@ -173,8 +174,9 @@ def _agent_runtime(tmp_path: Path) -> Runtime:
     event_service = EventService(events, EventSupervisor(events, None))
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    memory = TextMemory(tmp_path / "memory")
-    sessions = SessionManager(
+    memory = MemoryStore(tmp_path / "memory")
+    main = PersistentAgent(
+        memory.main_agent_id(),
         llm=llm,
         capabilities=registry,
         memory=memory,
@@ -183,19 +185,18 @@ def _agent_runtime(tmp_path: Path) -> Runtime:
         executors=executors,
         max_rounds=6,
     )
-    main = sessions.get(str(uuid4()))
     agents = AgentControl(
         main,
         llm=llm,
         capabilities=registry,
-        child_memory=TextMemory(tmp_path / "memory" / "agents"),
+        memory=memory,
         events=events,
         event_service=event_service,
         executors=executors,
         max_rounds=6,
     )
     config = PivotConfig(tmp_path, ProviderCredential("test", "test-model"))
-    return Runtime(config, registry, events, event_service, sessions, None, executors, agents)
+    return Runtime(config, registry, events, event_service, memory, main, None, executors, agents)
 
 
 def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) -> None:
@@ -203,7 +204,7 @@ def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) ->
     assert runtime.agents is not None
     updates = []
 
-    response = runtime.agents.main_agent.run("Handle this", progress=updates.append)
+    response = runtime.agents.main_agent.activate("Handle this", progress=updates.append)
 
     assert response == "Worker task accepted."
     records = runtime.agents.records()
@@ -239,11 +240,12 @@ def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
     service = EventService(events, EventSupervisor(events, None))
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    main = ConversationSession(
-        str(uuid4()),
+    memory = MemoryStore(tmp_path / "memory")
+    main = PersistentAgent(
+        memory.main_agent_id(),
         llm=BlockingWorkerLLM(),
         capabilities=registry,
-        memory=TextMemory(tmp_path / "memory"),
+        memory=memory,
         events=events,
         event_service=service,
         executors=executors,
@@ -252,7 +254,7 @@ def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
         main,
         llm=BlockingWorkerLLM(),
         capabilities=registry,
-        child_memory=TextMemory(tmp_path / "memory" / "agents"),
+        memory=memory,
         events=events,
         event_service=service,
         executors=executors,
@@ -273,6 +275,7 @@ def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
     assert worker.state == "completed"
     assert worker.report == "worker result"
     agents.close()
+    memory.close()
 
 
 def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
@@ -293,8 +296,9 @@ def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
     service = EventService(events, EventSupervisor(events, None))
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    memory = TextMemory(tmp_path / "memory")
-    sessions = SessionManager(
+    memory = MemoryStore(tmp_path / "memory")
+    main = PersistentAgent(
+        memory.main_agent_id(),
         llm=llm,
         capabilities=registry,
         memory=memory,
@@ -302,12 +306,11 @@ def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
         event_service=service,
         executors=executors,
     )
-    main = sessions.get(str(uuid4()))
     agents = AgentControl(
         main,
         llm=llm,
         capabilities=registry,
-        child_memory=TextMemory(tmp_path / "memory" / "agents"),
+        memory=memory,
         events=events,
         event_service=service,
         executors=executors,
@@ -318,7 +321,8 @@ def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
         registry,
         events,
         service,
-        sessions,
+        memory,
+        main,
         None,
         executors,
         agents,
@@ -336,7 +340,7 @@ def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
         deadline = time.monotonic() + 2
         completion_task = None
         while time.monotonic() < deadline:
-            candidates = [task for task in client.control.tasks() if task.operation == "session.send"]
+            candidates = [task for task in client.control.tasks() if task.operation == "agent.message"]
             if candidates:
                 completion_task = client.control.wait_task(candidates[-1].task_id, timeout=0.2)
                 if completion_task.state not in {"queued", "running"}:

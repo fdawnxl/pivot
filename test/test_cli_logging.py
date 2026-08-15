@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-import os
+import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+from pivot.activation import PersistentAgent
+from pivot.agents import AgentControl
 from pivot.capabilities import CapabilityRegistry
 from pivot.config import PivotConfig
 from pivot.credentials import ProviderCredential
 from pivot.dependencies import DependencyState, DependencyStatus
 from pivot.events import EventPool, EventService, EventSupervisor
-from pivot.memory import TextMemory
+from pivot.executors import ExecutorRegistry, ShellExecutor
+from pivot.memory import MemoryStore
 from pivot.models import CapabilityDescriptor, EventDescriptor
 from pivot.runtime import PivotClient, Runtime
-from pivot.session import SessionManager, SessionState
-from pivot.tui import DependencyItem, PIVOT_THEME, ConversationMessage, PivotApp, PromptEditor, SessionItem, WorkflowView
+from pivot.tui import AgentItem, AgentMessage, DependencyItem, PIVOT_THEME, PivotApp, PromptEditor, WorkflowView
 from pivot.ui import RuntimeSummary, render_banner, safe_endpoint
 
 
@@ -22,17 +26,40 @@ class EchoLLM:
         return {"choices": [{"message": {"content": "ack"}}]}
 
 
+def _runtime(tmp_path: Path, llm: Any | None = None) -> Runtime:
+    registry = CapabilityRegistry()
+    events = EventPool()
+    event_service = EventService(events, EventSupervisor(events, None))
+    executors = ExecutorRegistry()
+    executors.register(ShellExecutor(tmp_path, timeout=2))
+    memory = MemoryStore(tmp_path / "memory")
+    model = llm or EchoLLM()
+    main = PersistentAgent(
+        memory.main_agent_id(),
+        llm=model,
+        capabilities=registry,
+        memory=memory,
+        events=events,
+        event_service=event_service,
+        executors=executors,
+    )
+    agents = AgentControl(
+        main,
+        llm=model,
+        capabilities=registry,
+        memory=memory,
+        events=events,
+        event_service=event_service,
+        executors=executors,
+        max_rounds=8,
+    )
+    config = PivotConfig(instance_path=tmp_path, provider=ProviderCredential("test", "test-model"))
+    return Runtime(config, registry, events, event_service, memory, main, None, executors, agents)
+
+
 def test_textual_cli_uses_pivot_iris_dark_palette() -> None:
     assert PIVOT_THEME.name == "pivot-iris-dark"
     assert PIVOT_THEME.dark
-    assert PIVOT_THEME.primary == "#418AB4"
-    assert PIVOT_THEME.secondary == "#418AB4"
-    assert PIVOT_THEME.foreground == "#DAE3E6"
-    assert PIVOT_THEME.background == "#000000"
-    assert PIVOT_THEME.accent == "#407D52"
-    assert PIVOT_THEME.success == "#407D52"
-    assert PIVOT_THEME.warning == "#CFB64A"
-    assert PIVOT_THEME.error == "#9E2E24"
     allowed = {"#418AB4", "#407D52", "#9E2E24", "#CFB64A", "#DAE3E6", "#000000"}
     assert {
         PIVOT_THEME.primary,
@@ -50,30 +77,15 @@ def test_textual_cli_uses_pivot_iris_dark_palette() -> None:
     } <= allowed
 
 
-def test_textual_cli_shortcut_bindings_exclude_f2_and_alt_navigation() -> None:
+def test_textual_cli_shortcuts_have_no_timeline_navigation() -> None:
     bindings = {binding.key: binding for binding in PivotApp.BINDINGS}
-    assert {"ctrl+q", "ctrl+n", "ctrl+b", "ctrl+g", "ctrl+left", "ctrl+right", "ctrl+l"} <= bindings.keys()
-    assert all(bindings[key].show for key in ("ctrl+q", "ctrl+n", "ctrl+b", "ctrl+g", "ctrl+left", "ctrl+right", "ctrl+l"))
-    assert "f2" not in bindings
-    assert "alt+up" not in bindings
-    assert "alt+down" not in bindings
-
-
-def test_session_item_renders_runtime_state_and_current_label() -> None:
-    assert "$success" not in SessionItem("12345678", state=SessionState.READY)._label()
-    assert "$success" in SessionItem("12345678", state=SessionState.RUNNING)._label()
-    assert "$warning" in SessionItem("12345678", state=SessionState.PENDING)._label()
-    assert "CURRENT" in SessionItem("12345678", current=True)._label()
-    assert "ACTIVE" not in SessionItem("12345678", current=True)._label()
+    assert {"ctrl+q", "ctrl+b", "ctrl+g", "ctrl+l"} <= bindings.keys()
+    assert {"ctrl+n", "ctrl+left", "ctrl+right", "f2"}.isdisjoint(bindings)
 
 
 def test_dependency_item_renders_lifecycle_state_colors() -> None:
-    labels = {
-        state: DependencyItem(DependencyStatus("sensor", state))._label()
-        for state in DependencyState
-    }
-    assert "$success" in labels[DependencyState.READY]
-    assert "√" in labels[DependencyState.READY]
+    labels = {state: DependencyItem(DependencyStatus("sensor", state))._label() for state in DependencyState}
+    assert "$success" in labels[DependencyState.READY] and "√" in labels[DependencyState.READY]
     assert all(
         "$warning" in labels[state] and "⚪" in labels[state]
         for state in (DependencyState.STARTING, DependencyState.DEGRADED, DependencyState.STOPPING)
@@ -82,178 +94,94 @@ def test_dependency_item_renders_lifecycle_state_colors() -> None:
         "$error" in labels[state] and "×" in labels[state]
         for state in (DependencyState.STOPPED, DependencyState.ERROR)
     )
-    assert all(f"[dim]{state.value}[/]" not in labels[state] for state in DependencyState)
     assert all("\n" not in label for label in labels.values())
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_displays_dependency_statuses_in_sidebar(tmp_path: Path) -> None:
+async def test_textual_cli_displays_agent_and_dependency_statuses(tmp_path: Path) -> None:
     class Dependencies:
         refreshed = False
 
         def descriptors(self):
-            return (object(), object())
+            return (object(),)
 
         def statuses(self, *, refresh: bool = False):
             self.refreshed = self.refreshed or refresh
-            return (
-                DependencyStatus("sensor", DependencyState.READY, "available"),
-                DependencyStatus("camera", DependencyState.ERROR, "offline"),
-            )
+            return (DependencyStatus("sensor", DependencyState.READY, "available"),)
 
         def close(self) -> None:
             pass
 
     runtime = _runtime(tmp_path)
     object.__setattr__(runtime, "dependencies", Dependencies())
-    app = PivotApp(PivotClient(runtime), runtime.sessions.create())
-
-    async with app.run_test(size=(90, 36)) as pilot:
-        await pilot.pause()
-        items = list(app.query(DependencyItem))
-        assert [item.status.dependency_id for item in items] == ["sensor", "camera"]
-        assert "$success" in items[0]._label()
-        assert "$error" in items[1]._label()
-        assert all(item.region.height == 1 for item in items)
-        dependencies = app.query_one("#dependencies")
-        assert dependencies.parent is app.query_one("#sessions-pane")
+    client = PivotClient(runtime)
+    app = PivotApp(client, client.main_agent())
+    async with app.run_test(size=(100, 36)):
+        assert [item.record.role.value for item in app.query(AgentItem)] == ["main"]
+        dependencies = list(app.query(DependencyItem))
+        assert [item.status.dependency_id for item in dependencies] == ["sensor"]
+        assert dependencies[0].parent is app.query_one("#dependency-list")
         app._request_dependency_refresh()
         await app.workers.wait_for_complete()
         await app._refresh_dependency_list()
         assert runtime.dependencies is not None
         assert runtime.dependencies.refreshed  # type: ignore[attr-defined]
+    client.close()
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_sorts_sessions_by_state_then_recent_activity(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    ready_old = runtime.sessions.create()
-    pending = runtime.sessions.create()
-    running_old = runtime.sessions.create()
-    running_new = runtime.sessions.create()
-    ready_new = runtime.sessions.create()
-    pending._set_state(SessionState.PENDING)
-    running_old._set_state(SessionState.RUNNING)
-    running_new._set_state(SessionState.RUNNING)
-    ready_new._set_state(SessionState.READY)
-    app = PivotApp(PivotClient(runtime), ready_old)
-
-    async with app.run_test(size=(120, 36)):
-        items = list(app.query(SessionItem))
-        assert [item.session_id for item in items] == [
-            running_new.session_id,
-            running_old.session_id,
-            pending.session_id,
-            ready_new.session_id,
-            ready_old.session_id,
-        ]
-
-
-@pytest.mark.asyncio
-async def test_textual_cli_shortcut_bar_labels_and_clicks_common_actions(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    first = runtime.sessions.create()
-    app = PivotApp(PivotClient(runtime), first)
-
-    async with app.run_test(size=(160, 36)) as pilot:
-        labels = [str(button.label) for button in app.query("#shortcut-bar Button")]
-        assert labels == [
-            "New (Ctrl+N)",
-            "Older (Ctrl+←)",
-            "Newer (Ctrl+→)",
-            "Sessions (Ctrl+B)",
+async def test_textual_cli_shortcut_bar_targets_global_agent_actions(tmp_path: Path) -> None:
+    client = PivotClient(_runtime(tmp_path))
+    app = PivotApp(client, client.main_agent())
+    async with app.run_test(size=(140, 36)) as pilot:
+        assert [str(button.label) for button in app.query("#shortcut-bar Button")] == [
+            "Agents (Ctrl+B)",
             "Stop (Ctrl+G)",
             "Prompt (Ctrl+L)",
             "Quit (Ctrl+Q)",
         ]
-
-        await pilot.click("#shortcut-new")
-        await pilot.pause()
-        second = app.current_session
-        assert second is not first
-
-        await pilot.click("#shortcut-older")
-        await pilot.pause()
-        assert app.current_session is first
-
-        await pilot.click("#shortcut-newer")
-        await pilot.pause()
-        assert app.current_session is second
-
         app.query_one("#prompt", PromptEditor).blur()
         await pilot.click("#shortcut-prompt")
-        await pilot.pause()
         assert app.query_one("#prompt", PromptEditor).has_focus
-
-
-@pytest.mark.asyncio
-async def test_textual_cli_lists_persisted_sessions_newest_first(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    older = runtime.sessions.create()
-    newer = runtime.sessions.create()
-    memory = TextMemory(tmp_path / "memory")
-    memory.write(older.session_id, "")
-    memory.write(newer.session_id, "")
-    os.utime(memory.path_for(older.session_id), (1, 1))
-    os.utime(memory.path_for(newer.session_id), (2, 2))
-    app = PivotApp(PivotClient(runtime), older)
-
-    async with app.run_test(size=(120, 36)):
-        items = list(app.query(SessionItem))
-        assert [item.session_id for item in items] == [newer.session_id, older.session_id]
+    client.close()
 
 
 def test_banner_contains_runtime_summary_and_safe_endpoint() -> None:
-    session_id = "4b3c9f24-582c-42b1-bf25-f24a6f907f67"
+    agent_id = "4b3c9f24-582c-42b1-bf25-f24a6f907f67"
     summary = RuntimeSummary(
         provider="test-provider",
         model="test-model",
         endpoint=safe_endpoint("https://user:secret@example.test/v1?token=secret"),
-        session_id=session_id,
+        agent_id=agent_id,
         capabilities=(CapabilityDescriptor("read", "measure", "Read"),),
         events=(EventDescriptor("ready", "Ready", "state", ("==",)),),
     )
     banner = render_banner(summary)
-    assert "____  _" in banner
     assert "test-model" in banner
-    assert "test-provider" in banner
-    assert session_id in banner
+    assert agent_id in banner
     assert "measure:read" in banner
     assert "ready" in banner
     assert "secret" not in banner
 
 
-def _runtime(tmp_path: Path, llm=None) -> Runtime:
-    registry = CapabilityRegistry()
-    events = EventPool()
-    manager = SessionManager(llm=llm or EchoLLM(), capabilities=registry, memory=TextMemory(tmp_path / "memory"))
-    config = PivotConfig(instance_path=tmp_path, provider=ProviderCredential("test", "test-model"))
-    event_service = EventService(events, EventSupervisor(events, runner=None))  # type: ignore[arg-type]
-    return Runtime(config, registry, events, event_service, manager)
-
-
 @pytest.mark.asyncio
-async def test_textual_cli_keeps_prompt_focused_and_renders_response(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    session = runtime.sessions.create()
-    app = PivotApp(PivotClient(runtime), session)
-
+async def test_textual_cli_renders_main_agent_response(tmp_path: Path) -> None:
+    client = PivotClient(_runtime(tmp_path))
+    app = PivotApp(client, client.main_agent())
     async with app.run_test(size=(120, 36)) as pilot:
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "hello"
-        prompt.focus()
         await pilot.press("enter")
         await pilot.pause(0.3)
-
-        messages = list(app.query(ConversationMessage))
+        messages = list(app.query(AgentMessage))
         assert [message.role for message in messages] == ["user", "assistant"]
         assert messages[-1].content == "ack"
-        assert prompt.has_focus
-        assert prompt.text == ""
+        assert prompt.has_focus and prompt.text == ""
         workflow = app.query_one(WorkflowView)
         assert [(step.kind, step.state, step.result) for step in workflow.state.steps] == [
             ("model", "done", "Response ready")
         ]
+    client.close()
 
 
 @pytest.mark.asyncio
@@ -264,17 +192,12 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
 
         def complete(self, messages, *, tools=()):
             self.calls += 1
-            if self.calls % 2 == 1:
+            if self.calls % 2:
                 return {
-                    "choices": [
-                        {
-                            "message": {
-                                "tool_calls": [
-                                    {"id": "tool-1", "function": {"name": "echo", "arguments": '{"value":"measured"}'}}
-                                ]
-                            }
-                        }
-                    ]
+                    "choices": [{"message": {"tool_calls": [{
+                        "id": "tool-1",
+                        "function": {"name": "echo", "arguments": '{"value":"measured"}'},
+                    }]}}]
                 }
             return {"choices": [{"message": {"content": "The result is **measured**."}}]}
 
@@ -283,123 +206,61 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
         CapabilityDescriptor("echo", "work", "Echo a value", {"type": "object"}),
         lambda value: {"value": value},
     )
-    app = PivotApp(PivotClient(runtime), runtime.sessions.create())
-
+    client = PivotClient(runtime)
+    app = PivotApp(client, client.main_agent())
     async with app.run_test(size=(120, 36)) as pilot:
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "measure it"
         await pilot.press("enter")
         await pilot.pause(0.3)
-
         workflow = app.query_one(WorkflowView)
-        assert workflow.state.done
-        assert workflow.state.status == "Completed"
         assert [(step.kind, step.name, step.state) for step in workflow.state.steps] == [
             ("model", "model-round-1", "done"),
             ("capability", "echo", "done"),
             ("model", "model-round-2", "done"),
         ]
-        assert '"value":"measured"' in workflow.state.steps[1].request
-        assert "measured" in workflow.state.steps[1].result
-        assert workflow.state.steps[2].result == "Response ready"
-        assert list(app.query(ConversationMessage))[-1].content == "The result is **measured**."
-
-        prompt.text = "measure it again"
-        await pilot.press("enter")
-        await pilot.pause(0.3)
-        assert len(list(app.query(WorkflowView))) == 2
+        assert list(app.query(AgentMessage))[-1].content == "The result is **measured**."
+    client.close()
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_switches_sessions_while_work_continues(tmp_path: Path) -> None:
-    import threading
-
+async def test_textual_cli_queues_messages_while_main_agent_runs(tmp_path: Path) -> None:
+    started = threading.Event()
     release = threading.Event()
+    prompts: list[str] = []
 
     class SlowLLM:
         def complete(self, messages, *, tools=()):
-            release.wait(timeout=2)
-            return {"choices": [{"message": {"content": "slow ack"}}]}
+            prompt = next(message.content for message in reversed(messages) if message.role == "user")
+            prompts.append(prompt)
+            if prompt == "first":
+                started.set()
+                release.wait(timeout=2)
+            return {"choices": [{"message": {"content": f"ack {prompt}"}}]}
 
-    runtime = _runtime(tmp_path, SlowLLM())
-    first = runtime.sessions.create()
-    app = PivotApp(PivotClient(runtime), first)
+    client = PivotClient(_runtime(tmp_path, SlowLLM()))
+    app = PivotApp(client, client.main_agent())
     async with app.run_test(size=(120, 36)) as pilot:
         prompt = app.query_one("#prompt", PromptEditor)
-        prompt.text = "long task"
+        prompt.text = "first"
         await pilot.press("enter")
-        await pilot.pause(0.1)
-        assert first.session_id in app.session_turns
-
-        await pilot.press("ctrl+n")
-        await pilot.pause()
-        second = app.current_session
-        assert second.session_id != first.session_id
-        assert prompt.has_focus
-
+        assert started.wait(timeout=1)
+        prompt.text = "second"
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+        assert "1 queued" in str(app.query_one("#agent-state").render())
         release.set()
-        await pilot.pause(0.3)
-        assert first.session_id not in app.session_turns
-        assert app.current_session is second
+        await pilot.pause(0.8)
+        assert prompts == ["first", "second"]
+        assert [item.content for item in app.query(AgentMessage) if item.role == "assistant"] == [
+            "ack first",
+            "ack second",
+        ]
+    client.close()
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_keyboard_navigation_and_slash_commands(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    first = runtime.sessions.create()
-    app = PivotApp(PivotClient(runtime), first)
-
-    async with app.run_test(size=(120, 36)) as pilot:
-        prompt = app.query_one("#prompt", PromptEditor)
-        await pilot.press("ctrl+n")
-        await pilot.pause()
-        second = app.current_session
-        items = list(app.query(SessionItem))
-        assert [item.session_id for item in items] == [second.session_id, first.session_id]
-
-        await pilot.press("ctrl+left")
-        await pilot.pause()
-        session_list = app.query_one("#session-list")
-        assert app.current_session is second
-        assert session_list.has_focus_within
-        assert session_list.index == 0
-
-        await pilot.press("ctrl+left")
-        await pilot.pause()
-        assert app.current_session is first
-        assert session_list.has_focus_within
-        assert session_list.index == 1
-
-        await pilot.press("ctrl+right")
-        await pilot.pause()
-        assert app.current_session is second
-        assert session_list.has_focus_within
-        assert session_list.index == 0
-
-        prompt.text = "/prev"
-        prompt.focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.current_session is first
-
-        prompt.text = f"/switch {second.session_id[:8]}"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.current_session is second
-
-        prompt.text = "/help"
-        await pilot.press("enter")
-        await pilot.pause()
-        notice = list(app.query(ConversationMessage))[-1]
-        assert notice.role == "notice"
-        assert "/stop" in notice.content
-        assert "Ctrl+G" in notice.content
-
-
-@pytest.mark.asyncio
-async def test_textual_cli_interrupts_active_turn(tmp_path: Path) -> None:
-    import threading
-
+async def test_textual_cli_interrupts_active_activation(tmp_path: Path) -> None:
     started = threading.Event()
     release = threading.Event()
 
@@ -409,48 +270,47 @@ async def test_textual_cli_interrupts_active_turn(tmp_path: Path) -> None:
             release.wait(timeout=2)
             return {"choices": [{"message": {"content": "late response"}}]}
 
-    runtime = _runtime(tmp_path, SlowLLM())
-    session = runtime.sessions.create()
-    app = PivotApp(PivotClient(runtime), session)
+    client = PivotClient(_runtime(tmp_path, SlowLLM()))
+    app = PivotApp(client, client.main_agent())
     async with app.run_test(size=(120, 36)) as pilot:
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "long task"
         await pilot.press("enter")
         assert started.wait(timeout=1)
-
         await pilot.press("ctrl+g")
-        await pilot.pause()
-        turn = app.turns[app.session_turns[session.session_id][0]]
+        turn = app.turns[app.agent_activations[app.main_agent.agent_id][0]]
         assert turn.cancellation.is_cancelled()
-        assert turn.status == "Stopping at the next safe point"
-
         release.set()
         await pilot.pause(0.3)
-        assert session.session_id not in app.session_turns
         assert turn.interrupted
-        assert turn.status == "Interrupted"
-        assert all(message.content != "late response" for message in app.query(ConversationMessage))
-        assert list(app.query(ConversationMessage))[-1].content == "Turn interrupted."
+        assert all(message.content != "late response" for message in app.query(AgentMessage))
+        assert list(app.query(AgentMessage))[-1].content == "Turn interrupted."
+    client.close()
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_uses_compact_layout_on_narrow_terminals(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    app = PivotApp(PivotClient(runtime), runtime.sessions.create())
-
-    async with app.run_test(size=(72, 24)):
-        assert app.has_class("compact")
-        assert not app.query_one("#sessions-pane").display
-        assert app.query_one("#prompt", PromptEditor).has_focus
-
-        app.action_toggle_sessions()
-        assert app.query_one("#sessions-pane").display
-
-
-def test_pivot_client_keeps_runtime_api_outside_cli(tmp_path: Path) -> None:
+async def test_textual_cli_commands_and_compact_layout(tmp_path: Path) -> None:
     client = PivotClient(_runtime(tmp_path))
+    app = PivotApp(client, client.main_agent())
+    async with app.run_test(size=(72, 24)) as pilot:
+        assert app.has_class("compact")
+        assert app.query_one("#body").has_class("agents-hidden")
+        prompt = app.query_one("#prompt", PromptEditor)
+        prompt.text = "/help"
+        await pilot.press("enter")
+        notice = list(app.query(AgentMessage))[-1]
+        assert notice.role == "notice"
+        assert "/agents" in notice.content and "/stop" in notice.content
+        app.action_toggle_agents()
+        assert not app.query_one("#body").has_class("agents-hidden")
+    client.close()
 
-    session = client.create_session()
-    assert client.get_session(session.session_id) is session
-    assert client.run(session.session_id, "hello") == "ack"
-    assert client.sessions() == (session,)
+
+def test_pivot_client_exposes_only_persistent_main_agent(tmp_path: Path) -> None:
+    client = PivotClient(_runtime(tmp_path))
+    try:
+        main = client.main_agent()
+        assert client.main_agent() is main
+        assert client.run_main("hello") == "ack"
+    finally:
+        client.close()

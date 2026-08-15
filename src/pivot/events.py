@@ -154,7 +154,7 @@ class EventWait:
     wait_id: str
     event_name: str
     field: str
-    session_id: str
+    agent_id: str
     operator: str
     expected: Any
     timeout: float
@@ -169,7 +169,7 @@ class EventWait:
 class EventNotification:
     wait_id: str
     event_name: str
-    session_id: str
+    agent_id: str
     status: Literal["matched", "timeout", "error"]
     message: str
     payload: Mapping[str, Any] | None = None
@@ -211,7 +211,7 @@ class EventPool:
         with self._lock:
             return tuple(sorted(self._events.values(), key=lambda item: item.name))
 
-    def create_wait(self, event_name: str, session_id: str, operator_name: str, expected: Any, timeout: float) -> EventWait:
+    def create_wait(self, event_name: str, agent_id: str, operator_name: str, expected: Any, timeout: float) -> EventWait:
         if timeout <= 0:
             raise EventError("Event timeout must be greater than zero")
         with self._lock:
@@ -224,7 +224,7 @@ class EventPool:
                 str(uuid4()),
                 event_name,
                 event.field,
-                session_id,
+                agent_id,
                 operator_name,
                 expected,
                 timeout,
@@ -312,7 +312,7 @@ class EventPool:
         payload: Mapping[str, Any] | None = None,
     ) -> EventNotification:
         wait = self._waiters.pop(wait_id)
-        notification = EventNotification(wait_id, wait.event_name, wait.session_id, status, message, dict(payload) if payload else None)
+        notification = EventNotification(wait_id, wait.event_name, wait.agent_id, status, message, dict(payload) if payload else None)
         self._completed[wait_id] = notification
         LOGGER.info("Event wait completed event=%s wait_id=%s status=%s", wait.event_name, wait_id, status, extra={"event": wait.event_name})
         return notification
@@ -410,7 +410,7 @@ class EventService:
     def wait(
         self,
         *,
-        session_id: str,
+        agent_id: str,
         event: str,
         operator: str,
         expected: Any,
@@ -419,7 +419,7 @@ class EventService:
     ) -> EventNotification:
         if timeout > self.max_wait:
             raise EventError(f"Event timeout exceeds configured maximum ({self.max_wait:g} seconds)")
-        request = self.pool.create_wait(event, session_id, operator, expected, timeout)
+        request = self.pool.create_wait(event, agent_id, operator, expected, timeout)
         try:
             while True:
                 if is_cancelled is not None and is_cancelled():

@@ -41,10 +41,6 @@ def _arguments(value: str) -> dict[str, Any]:
     return dict(parsed)
 
 
-def _session_id(value: str) -> str | None:
-    return value or None
-
-
 def _service_interface(control: PivotControl) -> Any:
     try:
         from dbus_next import DBusError
@@ -94,36 +90,20 @@ def _service_interface(control: PivotControl) -> Any:
             return self._call(lambda: control.cancel_task(task_id))
 
         @method()
-        def CreateSession(self, select: "b") -> "s":
-            return self._call(lambda: _json(control.session_snapshot(control.create_session(select=select).session_id)))
+        def GetMainAgent(self) -> "s":
+            return self._call(lambda: _json(control.main_snapshot()))
 
         @method()
-        def SelectSession(self, session_id: "s") -> "s":
-            return self._call(lambda: _json(control.session_snapshot(control.select_session(session_id).session_id)))
+        def GetHistory(self) -> "s":
+            return self._call(lambda: _json(control.history()))
 
         @method()
-        def GetSelectedSession(self) -> "s":
-            return self._call(lambda: _json(control.session_snapshot()))
+        def SendMessage(self, message: "s") -> "s":
+            return self._call(lambda: control.submit_message(message))
 
         @method()
-        def ListSessions(self) -> "s":
-            return self._call(lambda: _json(control.list_sessions()))
-
-        @method()
-        def GetSession(self, session_id: "s") -> "s":
-            return self._call(lambda: _json(control.session_snapshot(_session_id(session_id))))
-
-        @method()
-        def GetHistory(self, session_id: "s") -> "s":
-            return self._call(lambda: _json(control.history(_session_id(session_id))))
-
-        @method()
-        def SendMessage(self, session_id: "s", message: "s") -> "s":
-            return self._call(lambda: control.submit_message(message, session_id=_session_id(session_id)))
-
-        @method()
-        def CancelSession(self, session_id: "s") -> "b":
-            return self._call(lambda: control.cancel_session(_session_id(session_id)))
+        def InterruptMain(self) -> "b":
+            return self._call(control.interrupt_main)
 
         @method()
         def RequestShutdown(self) -> "b":

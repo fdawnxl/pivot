@@ -1,4 +1,4 @@
-"""Lightweight multi-agent orchestration built on isolated conversation sessions."""
+"""Lightweight parallel orchestration for persistent agents."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import logging
 from uuid import uuid4
 from typing import Any
 
-from .session import ConversationSession
+from .activation import PersistentAgent
 from .logging import log_context
 
 LOGGER = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ class AgentResult:
 class AgentOrchestrator:
     """Run independent agents concurrently and collect every result."""
 
-    def __init__(self, agents: dict[str, ConversationSession], *, max_workers: int | None = None) -> None:
+    def __init__(self, agents: dict[str, PersistentAgent], *, max_workers: int | None = None) -> None:
         if not agents:
             raise ValueError("At least one agent is required")
         self.agents = dict(agents)
@@ -50,6 +50,6 @@ class AgentOrchestrator:
         return ordered
 
     @staticmethod
-    def _run_agent(agent_id: str, agent: ConversationSession, user_input: Any) -> str:
-        with log_context(correlation_id=str(uuid4()), agent_id=agent_id, session_id=agent.session_id):
-            return agent.run(user_input)
+    def _run_agent(agent_id: str, agent: PersistentAgent, user_input: Any) -> str:
+        with log_context(correlation_id=str(uuid4()), agent_id=agent_id):
+            return agent.activate(user_input)

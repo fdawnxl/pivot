@@ -18,7 +18,7 @@ from test_control import _runtime
 
 
 @pytest.mark.skipif(shutil.which("dbus-daemon") is None, reason="dbus-daemon is unavailable")
-def test_dbus_control_creates_session_sends_message_and_reads_history(tmp_path: Path) -> None:
+def test_dbus_control_sends_main_agent_message_and_reads_history(tmp_path: Path) -> None:
     bus_process = subprocess.Popen(
         ["dbus-daemon", "--session", "--nofork", "--print-address=1"],
         stdout=subprocess.PIPE,
@@ -43,9 +43,9 @@ def test_dbus_control_creates_session_sends_message_and_reads_history(tmp_path: 
             proxy = bus.get_proxy_object(service_name, CONTROL_DBUS_PATH, introspection)
             interface = proxy.get_interface(CONTROL_DBUS_INTERFACE)
             assert await interface.call_ping() == "pivot"
-            created = json.loads(await interface.call_create_session(True))
-            session_id = created["session_id"]
-            task_id = await interface.call_send_message(session_id, "remote")
+            main = json.loads(await interface.call_get_main_agent())
+            assert main["agent_id"] == client.main_agent().agent_id
+            task_id = await interface.call_send_message("remote")
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 task = json.loads(await interface.call_get_task(task_id))
@@ -54,14 +54,14 @@ def test_dbus_control_creates_session_sends_message_and_reads_history(tmp_path: 
                 await asyncio.sleep(0.01)
             assert task["state"] == "completed"
             assert task["result"]["response"] == "ack: remote"
-            history = json.loads(await interface.call_get_history(session_id))
+            history = json.loads(await interface.call_get_history())
             assert history[-1]["content"] == "ack: remote"
             operations = json.loads(await interface.call_list_operations())
             assert "dependency.start" in {item["name"] for item in operations}
             assert "event.wait" in {item["name"] for item in operations}
-            invoked = await interface.call_invoke("session.get", json.dumps({"session_id": session_id}))
+            invoked = await interface.call_invoke("agent.main", "{}")
             invoked_task = control.wait_task(invoked, timeout=2)
-            assert invoked_task.result["session_id"] == session_id
+            assert invoked_task.result["agent_id"] == main["agent_id"]
         finally:
             bus.disconnect()
 

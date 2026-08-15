@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
-
 from .agents import AgentControl
+from .activation import CancellationToken, PersistentAgent, ProgressCallback
 from .capabilities import CapabilityRegistry
 from .capabilities.discovery import register_instance_capabilities
 from .config import PivotConfig
@@ -16,8 +15,7 @@ from .events import EventPool, EventScriptRunner, EventService, EventSupervisor,
 from .executors import ExecutorRegistry, ShellExecutor
 from .llm import LiteLLMClient
 from .lease import RuntimeLease
-from .memory import TextMemory
-from .session import CancellationToken, ConversationSession, ProgressCallback, SessionManager
+from .memory import ContextBuilder, MemoryService, MemoryStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,7 +28,8 @@ class Runtime:
     registry: CapabilityRegistry
     events: EventPool
     event_service: EventService
-    sessions: SessionManager
+    memory: MemoryStore
+    main_agent: PersistentAgent
     dependencies: DependencyManager | None = None
     executors: ExecutorRegistry | None = None
     agents: AgentControl | None = None
@@ -41,14 +40,16 @@ class Runtime:
 
         if self.agents is not None:
             self.agents.close()
+        self.main_agent.wait_until_idle()
         if self.dependencies is not None:
             self.dependencies.close()
+        self.memory.close()
         if self.lease is not None:
             self.lease.release()
 
 
 def build_runtime(config: PivotConfig) -> Runtime:
-    """Build capability, event, LLM, memory, and session services."""
+    """Build capability, event, LLM, memory, and agent services."""
 
     lease = RuntimeLease(config.instance_path)
     lease.acquire()
@@ -59,6 +60,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
         dbus_timeout=config.dependency_dbus_timeout,
         stop_timeout=config.dependency_stop_timeout,
     )
+    memory: MemoryStore | None = None
     try:
         dependencies.start_all()
         registry = CapabilityRegistry()
@@ -100,22 +102,25 @@ def build_runtime(config: PivotConfig) -> Runtime:
                 max_output_bytes=config.executor_max_output_bytes,
             )
         )
-        manager = SessionManager(
+        memory = MemoryStore(config.instance_path / "memory")
+        memory_service = MemoryService(memory)
+        main_agent = PersistentAgent(
+            memory.main_agent_id(),
             llm=llm,
             capabilities=registry,
-            memory=TextMemory(config.instance_path / "memory"),
+            memory=memory,
             events=event_pool,
             event_service=event_service,
             executors=executors,
+            memory_service=memory_service,
+            context_builder=ContextBuilder(memory),
             max_rounds=config.max_rounds,
         )
-        main_agent_id = str(uuid5(NAMESPACE_URL, f"pivot-main-agent:{config.instance_path}"))
-        main_agent = manager.get(main_agent_id)
         agents = AgentControl(
             main_agent,
             llm=llm,
             capabilities=registry,
-            child_memory=TextMemory(config.instance_path / "memory" / "agents"),
+            memory=memory,
             events=event_pool,
             event_service=event_service,
             executors=executors,
@@ -128,9 +133,22 @@ def build_runtime(config: PivotConfig) -> Runtime:
             len(event_pool.descriptors()),
             len(executors.descriptors()),
         )
-        return Runtime(config, registry, event_pool, event_service, manager, dependencies, executors, agents, lease)
+        return Runtime(
+            config,
+            registry,
+            event_pool,
+            event_service,
+            memory,
+            main_agent,
+            dependencies,
+            executors,
+            agents,
+            lease,
+        )
     except BaseException:
         dependencies.close()
+        if memory is not None:
+            memory.close()
         lease.release()
         raise
 
@@ -151,40 +169,10 @@ class PivotClient:
 
         return cls(build_runtime(PivotConfig.load(instance_path=instance_path)))
 
-    def create_session(self) -> ConversationSession:
-        """Return the sole user-facing main agent conversation."""
-
-        return self.control.create_session()
-
-    def main_agent(self) -> ConversationSession:
+    def main_agent(self) -> PersistentAgent:
         """Return the sole user-facing main agent."""
 
-        if self.runtime.agents is not None:
-            return self.runtime.agents.main_agent
-        sessions = self.control.sessions()
-        return sessions[0] if sessions else self.control.create_session()
-
-    def get_session(self, session_id: str) -> ConversationSession:
-        """Load or create a canonical UUID conversation."""
-
-        return self.control.get_session(session_id)
-
-    def select_session(self, session_id: str) -> ConversationSession:
-        """Select the conversation used by implicit control operations."""
-
-        return self.control.select_session(session_id)
-
-    def run(
-        self,
-        session_id: str,
-        user_input: Any,
-        *,
-        progress: ProgressCallback | None = None,
-        cancellation: CancellationToken | None = None,
-    ) -> str:
-        """Run one conversation turn without involving terminal UI code."""
-
-        return self.control.run(session_id, user_input, progress=progress, cancellation=cancellation)
+        return self.runtime.main_agent
 
     def run_main(
         self,
@@ -195,12 +183,7 @@ class PivotClient:
     ) -> str:
         """Run one turn through the main agent."""
 
-        return self.control.run(self.main_agent().session_id, user_input, progress=progress, cancellation=cancellation)
-
-    def sessions(self) -> tuple[ConversationSession, ...]:
-        """List sessions currently managed by this client."""
-
-        return self.control.sessions()
+        return self.control.run_main(user_input, progress=progress, cancellation=cancellation)
 
     def start_dbus(
         self,

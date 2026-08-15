@@ -17,13 +17,13 @@ from .capabilities import CapabilityError, CapabilityRegistry
 from .events import EventPool, EventService
 from .executors import ExecutorRegistry
 from .llm import LLMClient
-from .memory import TextMemory
-from .session import (
+from .memory import ContextBuilder, MemoryService, MemoryStore
+from .activation import (
+    ActivationProgress,
+    AgentCancelled,
     CancellationToken,
-    ConversationSession,
+    PersistentAgent,
     ProgressCallback,
-    SessionCancelled,
-    SessionProgress,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -53,12 +53,13 @@ class AgentRecord:
     agent_id: str
     name: str
     role: AgentRole
-    session: ConversationSession = field(repr=False)
+    agent: PersistentAgent = field(repr=False)
     parent_id: str | None = None
     capabilities: tuple[str, ...] = ()
     events: tuple[str, ...] = ()
     state: AgentState = AgentState.CREATED
     task: str | None = None
+    task_id: str | None = None
     report: Any = None
     error: str | None = None
     created_at: float = field(default_factory=time.time)
@@ -67,7 +68,7 @@ class AgentRecord:
     future: Future[Any] | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
-        state = self.session.state.value if self.role == AgentRole.MAIN else self.state.value
+        state = self.agent.state.value if self.role == AgentRole.MAIN else self.state.value
         return {
             "agent_id": self.agent_id,
             "name": self.name,
@@ -77,6 +78,7 @@ class AgentRecord:
             "events": list(self.events),
             "state": state,
             "task": self.task,
+            "task_id": self.task_id,
             "report": self.report,
             "error": self.error,
             "created_at": self.created_at,
@@ -89,11 +91,11 @@ class AgentControl:
 
     def __init__(
         self,
-        main_agent: ConversationSession,
+        main_agent: PersistentAgent,
         *,
         llm: LLMClient,
         capabilities: CapabilityRegistry,
-        child_memory: TextMemory,
+        memory: MemoryStore,
         events: EventPool,
         event_service: EventService,
         executors: ExecutorRegistry,
@@ -103,7 +105,8 @@ class AgentControl:
         self.main_agent = main_agent
         self.llm = llm
         self.capabilities = capabilities
-        self.child_memory = child_memory
+        self.memory = memory
+        self.memory_service = MemoryService(memory)
         self.events = events
         self.event_service = event_service
         self.executors = executors
@@ -111,8 +114,8 @@ class AgentControl:
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="pivot-agent")
         self._completion_handler: Callable[[AgentRecord], None] | None = None
         self._records: dict[str, AgentRecord] = {
-            main_agent.session_id: AgentRecord(
-                main_agent.session_id,
+            main_agent.agent_id: AgentRecord(
+                main_agent.agent_id,
                 "main",
                 AgentRole.MAIN,
                 main_agent,
@@ -122,7 +125,8 @@ class AgentControl:
             )
         }
         self._lock = threading.RLock()
-        main_agent.configure_agent(role=AgentRole.MAIN.value, name="main", control=self, executors=executors)
+        main_agent.configure_control(self, executors=executors)
+        self._restore_workers()
 
     def set_completion_handler(self, handler: Callable[[AgentRecord], None] | None) -> None:
         """Receive worker terminal states for reinjection into the main-agent mailbox."""
@@ -134,7 +138,7 @@ class AgentControl:
         """Cancel active workers and release worker execution threads."""
 
         self.cancel_workers()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def cancel_workers(self) -> bool:
         """Cooperatively cancel every running worker."""
@@ -162,7 +166,63 @@ class AgentControl:
 
     @property
     def main_agent_id(self) -> str:
-        return self.main_agent.session_id
+        return self.main_agent.agent_id
+
+    def _restore_workers(self) -> None:
+        """Restore durable worker identities and mark interrupted work explicitly."""
+
+        known_events = {item.name for item in self.events.descriptors()}
+        for row in self.memory.agent_rows():
+            if row["role"] != AgentRole.WORKER.value:
+                continue
+            capabilities = tuple(row["capabilities"])
+            events = tuple(row["events"])
+            try:
+                scoped = self.capabilities.scoped(capabilities)
+            except CapabilityError as exc:
+                LOGGER.warning("Unable to restore worker agent_id=%s error=%s", row["agent_id"], exc)
+                continue
+            if set(events) - known_events:
+                LOGGER.warning("Unable to restore worker with unavailable events agent_id=%s", row["agent_id"])
+                continue
+            worker = PersistentAgent(
+                row["agent_id"],
+                llm=self.llm,
+                capabilities=scoped,
+                memory=self.memory,
+                events=self.events,
+                event_service=self.event_service,
+                event_names=events,
+                executors=self.executors,
+                memory_service=self.memory_service,
+                context_builder=ContextBuilder(self.memory),
+                max_rounds=self.max_rounds,
+                role=AgentRole.WORKER.value,
+                name=row["name"],
+            )
+            worker.configure_control(self, executors=self.executors)
+            try:
+                state = AgentState(row["state"])
+            except ValueError:
+                state = AgentState.FAILED
+            error = None
+            if state == AgentState.RUNNING:
+                state = AgentState.FAILED
+                error = "Runtime restarted before worker completion"
+                self.memory.update_agent_state(row["agent_id"], state.value)
+            self._records[row["agent_id"]] = AgentRecord(
+                row["agent_id"],
+                row["name"],
+                AgentRole.WORKER,
+                worker,
+                parent_id=row["parent_id"],
+                capabilities=capabilities,
+                events=events,
+                state=state,
+                error=error,
+                created_at=float(row["created_at"]),
+                updated_at=float(row["updated_at"]),
+            )
 
     def records(self) -> tuple[AgentRecord, ...]:
         with self._lock:
@@ -180,12 +240,12 @@ class AgentControl:
             raise AgentControlError(f"Unknown agent: {agent_id}")
         return record
 
-    def prompt_context(self, session: ConversationSession) -> list[dict[str, Any]]:
+    def prompt_context(self, agent: PersistentAgent) -> list[dict[str, Any]]:
         common = [
             {"name": "agent.list", "description": "List agents visible to this agent."},
             {"name": "agent.get", "description": "Read one agent's current state."},
         ]
-        if session.session_id == self.main_agent_id:
+        if agent.agent_id == self.main_agent_id:
             return common + [
                 {
                     "name": "agent.delegate",
@@ -216,7 +276,7 @@ class AgentControl:
 
     def execute(
         self,
-        session: ConversationSession,
+        agent: PersistentAgent,
         operation: str,
         arguments: Mapping[str, Any],
         *,
@@ -226,16 +286,16 @@ class AgentControl:
         """Invoke one internal control operation on behalf of an agent."""
 
         if operation == "agent.list":
-            return [record.as_dict() for record in self._visible_records(session)]
+            return [record.as_dict() for record in self._visible_records(agent)]
         if operation == "agent.get":
             agent_id = _required_string(arguments, "agent_id")
             record = self.get(agent_id)
-            if record not in self._visible_records(session):
+            if record not in self._visible_records(agent):
                 raise AgentControlError(f"Agent is not visible: {agent_id}")
             return record.as_dict()
         if operation == "agent.report":
-            return self._report(session, arguments)
-        self._require_main(session)
+            return self._report(agent, arguments)
+        self._require_main(agent)
         if operation == "agent.create":
             return self._create(arguments).as_dict()
         if operation == "agent.assign":
@@ -281,26 +341,33 @@ class AgentControl:
             name = name_value.strip()
         else:
             raise AgentControlError("Agent name must be a non-empty string")
-        agent_id = str(uuid4())
-        session = ConversationSession(
+        agent_id = self.memory.create_worker(
+            name=name,
+            parent_id=self.main_agent_id,
+            capabilities=capabilities,
+            events=events,
+        )
+        worker = PersistentAgent(
             agent_id,
             llm=self.llm,
             capabilities=scoped_capabilities,
-            memory=self.child_memory,
+            memory=self.memory,
             events=self.events,
             event_service=self.event_service,
             event_names=events,
             executors=self.executors,
+            memory_service=self.memory_service,
+            context_builder=ContextBuilder(self.memory),
             max_rounds=self.max_rounds,
-            agent_role=AgentRole.WORKER.value,
-            agent_name=name,
+            role=AgentRole.WORKER.value,
+            name=name,
         )
-        session.configure_agent(role=AgentRole.WORKER.value, name=name, control=self, executors=self.executors)
+        worker.configure_control(self, executors=self.executors)
         record = AgentRecord(
             agent_id,
             name,
             AgentRole.WORKER,
-            session,
+            worker,
             parent_id=self.main_agent_id,
             capabilities=capabilities,
             events=events,
@@ -331,10 +398,13 @@ class AgentControl:
                 raise AgentControlError(f"Agent is already running: {record.agent_id}")
             record.state = AgentState.RUNNING
             record.task = task
+            record.task_id = str(uuid4())
             record.report = None
             record.error = None
             record.updated_at = time.time()
             record.cancellation = token
+            self.memory.update_agent_state(record.agent_id, AgentState.RUNNING.value)
+            self.memory.upsert_task(record.task_id, record.agent_id, task, AgentState.RUNNING.value)
         self._emit(progress, "agent_started", record, f"Delegated task to {record.name}.")
 
         record.future = self._executor.submit(self._run_assigned, record, task, token, progress)
@@ -349,7 +419,7 @@ class AgentControl:
     ) -> None:
         """Execute an assigned worker without occupying the main-agent activation."""
 
-        def child_progress(update: SessionProgress) -> None:
+        def child_progress(update: ActivationProgress) -> None:
             self._emit(
                 progress,
                 "agent_progress",
@@ -359,17 +429,39 @@ class AgentControl:
             )
 
         try:
-            response = record.session.run(task, progress=child_progress, cancellation=cancellation)
-        except SessionCancelled:
+            response = record.agent.activate(
+                task,
+                source="delegation",
+                progress=child_progress,
+                cancellation=cancellation,
+            )
+        except AgentCancelled:
             with self._lock:
                 record.state = AgentState.CANCELLED
                 record.updated_at = time.time()
+                self.memory.update_agent_state(record.agent_id, AgentState.CANCELLED.value)
+                if record.task_id:
+                    self.memory.upsert_task(
+                        record.task_id,
+                        record.agent_id,
+                        task,
+                        AgentState.CANCELLED.value,
+                    )
             self._emit(progress, "agent_failed", record, f"{record.name} was cancelled.")
         except Exception as exc:
             with self._lock:
                 record.state = AgentState.FAILED
                 record.error = f"{type(exc).__name__}: {exc}"
                 record.updated_at = time.time()
+                self.memory.update_agent_state(record.agent_id, AgentState.FAILED.value)
+                if record.task_id:
+                    self.memory.upsert_task(
+                        record.task_id,
+                        record.agent_id,
+                        task,
+                        AgentState.FAILED.value,
+                        error=record.error,
+                    )
             self._emit(progress, "agent_failed", record, f"{record.name} failed: {record.error}")
         else:
             with self._lock:
@@ -377,6 +469,15 @@ class AgentControl:
                 record.updated_at = time.time()
                 result = record.report if record.report is not None else response
                 record.report = result
+                self.memory.update_agent_state(record.agent_id, AgentState.COMPLETED.value)
+                if record.task_id:
+                    self.memory.upsert_task(
+                        record.task_id,
+                        record.agent_id,
+                        task,
+                        AgentState.COMPLETED.value,
+                        result=result,
+                    )
             self._emit(progress, "agent_completed", record, f"{record.name} reported a result.")
         finally:
             with self._lock:
@@ -391,10 +492,10 @@ class AgentControl:
                         type(exc).__name__,
                     )
 
-    def _report(self, session: ConversationSession, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    def _report(self, agent: PersistentAgent, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if set(arguments) != {"result"}:
             raise AgentControlError("agent.report requires exactly result")
-        record = self.get(session.session_id)
+        record = self.get(agent.agent_id)
         if record.role != AgentRole.WORKER:
             raise AgentControlError("Only worker agents can report delegated results")
         with self._lock:
@@ -403,14 +504,14 @@ class AgentControl:
         LOGGER.info("Worker agent report received agent_id=%s", record.agent_id)
         return {"accepted": True, "agent_id": record.agent_id}
 
-    def _visible_records(self, session: ConversationSession) -> tuple[AgentRecord, ...]:
+    def _visible_records(self, agent: PersistentAgent) -> tuple[AgentRecord, ...]:
         records = self.records()
-        if session.session_id == self.main_agent_id:
+        if agent.agent_id == self.main_agent_id:
             return records
-        return tuple(record for record in records if record.agent_id in {self.main_agent_id, session.session_id})
+        return tuple(record for record in records if record.agent_id in {self.main_agent_id, agent.agent_id})
 
-    def _require_main(self, session: ConversationSession) -> None:
-        if session.session_id != self.main_agent_id:
+    def _require_main(self, agent: PersistentAgent) -> None:
+        if agent.agent_id != self.main_agent_id:
             raise AgentControlError("Only the main agent can create or assign worker agents")
 
     def _emit(
@@ -426,7 +527,7 @@ class AgentControl:
             return
         result = {"agent": record.as_dict(), **dict(extra or {})}
         try:
-            progress(SessionProgress(kind, self.main_agent_id, message, name=record.name, result=result))
+            progress(ActivationProgress(kind, self.main_agent_id, "worker-control", message, name=record.name, result=result))
         except Exception as exc:
             LOGGER.warning("Agent progress callback failed agent_id=%s error_type=%s", record.agent_id, type(exc).__name__)
 
