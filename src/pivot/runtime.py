@@ -39,6 +39,8 @@ class Runtime:
     def close(self) -> None:
         """Release runtime-owned external processes."""
 
+        if self.agents is not None:
+            self.agents.close()
         if self.dependencies is not None:
             self.dependencies.close()
         if self.lease is not None:

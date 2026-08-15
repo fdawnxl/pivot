@@ -18,7 +18,7 @@ An instance is owned by exactly one runtime process at a time. Pivot acquires an
 
 While a CLI process is running, pivot also attempts to export the same application control surface on the session D-Bus as `org.pivot.Control` at `/org/pivot/Control`. Remote clients can send work to the main agent, inspect agent/capability/event/executor/dependency state, manage delegated workers, interrupt work, invoke extensible operations, and request shutdown. The CLI and TUI continue to call local Python methods directly if D-Bus is unavailable. Run a headless control process with `uv run pivot --dbus-only`, or disable export with `--no-dbus`. See [the control protocol](doc/control-dbus.md).
 
-Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+B` to toggle the agent sidebar, `Ctrl+G` to interrupt the main agent and its active worker, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The prompt accepts `/agents`, `/session`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits and delegated workers stop during safe polling boundaries, while a synchronous model, capability, or executor request stops at its next safe boundary. The same runtime is available through `pivot.PivotClient.run_main` for non-terminal clients.
+Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+B` to toggle the agent sidebar, `Ctrl+G` to interrupt the main agent and its active workers, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The prompt accepts `/agents`, `/session`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits and delegated workers stop during safe polling boundaries, while a synchronous model, capability, or executor request stops at its next safe boundary. The same runtime is available through `pivot.PivotClient.run_main` for non-terminal clients.
 
 The main agent has a single FIFO mailbox shared by local and remote callers. New messages are accepted while it is active, remain visibly queued, and run in receipt order; cancelling one queued request does not block later messages. Worker agents remain directly scheduled by the main agent and do not use this mailbox.
 
@@ -107,6 +107,8 @@ the following model round and UUID-isolated JSONL history without interpreting t
 Think descriptors are injected lazily. The model sees their names and summaries at first, then calls the built-in `pivot_read_think` tool only when it needs the full text. Work processes use a fixed instance directory, a restricted environment, a timeout, and an output limit. This is process isolation intended to protect the pivot interpreter; deployments executing hostile commands should add an operating-system sandbox.
 
 Events are generic monitored fields rather than fixed thresholds. An event descriptor advertises a field and supported operators. The model calls `pivot_wait_event` with the chosen operator, expected value, and timeout. A matching value, timeout, or isolated source error is formatted with the event's injection template, appended as a tool result, and sent back to the LLM so the same conversation can continue.
+
+Long event waits belong to delegated workers. The persistent main agent does not advertise the native wait tool, and direct main-agent waits longer than one second are rejected with guidance to delegate. `agent.delegate` and `agent.assign` start workers asynchronously; completion, failure, or cancellation is delivered later through the main-agent FIFO mailbox as an internal input.
 
 Run the test suite with:
 

@@ -251,7 +251,9 @@ class ConversationSession:
             role_instruction = (
                 "You are the only agent that communicates with the user. Solve requests directly when appropriate. "
                 "For separable or specialist work, use control agent.delegate and assign only the capabilities and "
-                "events the worker needs. Always review worker reports and synthesize the final user-facing answer."
+                "events the worker needs. Delegate event waits longer than one second so the main agent remains "
+                "available. Delegation returns immediately; worker completion will arrive as a later internal input. "
+                "Always review worker reports and synthesize the final user-facing answer."
             )
         else:
             role_instruction = (
@@ -290,6 +292,7 @@ class ConversationSession:
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
+        input_role: Literal["user", "system"] = "user",
     ) -> str:
         try:
             normalized_input = normalize_content(user_input)
@@ -304,7 +307,12 @@ class ConversationSession:
         self._set_state(SessionState.RUNNING)
         try:
             with log_context(correlation_id=str(uuid4()), session_id=self.session_id):
-                return self._run_correlated(normalized_input, progress=progress, cancellation=cancellation)
+                return self._run_correlated(
+                    normalized_input,
+                    progress=progress,
+                    cancellation=cancellation,
+                    input_role=input_role,
+                )
         finally:
             self._set_state(SessionState.READY)
             self._run_lock.release()
@@ -315,13 +323,14 @@ class ConversationSession:
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
+        input_role: Literal["user", "system"] = "user",
     ) -> str:
         """Run one turn under the correlation context established by ``run``."""
 
         self._raise_if_cancelled(cancellation, progress)
         if not self.history:
             self.history.append(self._context_message())
-        self.history.append(Message(role="user", content=user_input))
+        self.history.append(Message(role=input_role, content=user_input))
         self._persist()
         rollback_to = len(self.history)
         LOGGER.info("Session turn started session_id=%s input_parts=%d", self.session_id, len(user_input) if isinstance(user_input, tuple) else 1)
@@ -332,7 +341,7 @@ class ConversationSession:
             self._emit_progress(progress, "llm_waiting", "Waiting for the model.", round_number=round_number)
             try:
                 tools = (action_tool(),) + self.capabilities.llm_tools()
-                if self.event_service:
+                if self.event_service and (self.agent_role == "worker" or self.agent_control is None):
                     tools += self.event_service.llm_tools(self.event_names)
                 if self.executors:
                     tools += self.executors.llm_tools()
@@ -450,6 +459,13 @@ class ConversationSession:
         if action.kind == ActionKind.EVENT:
             if action.name not in {"wait", EVENT_WAIT_TOOL}:
                 raise ActionError(f"Unknown event action: {action.name}")
+            timeout = action.arguments.get("timeout")
+            if (
+                self.agent_role == "main"
+                and self.agent_control is not None
+                and (not isinstance(timeout, (int, float)) or timeout > 1)
+            ):
+                raise ActionError("Main-agent event waits over 1 second must be delegated to a worker")
             self._set_state(SessionState.PENDING)
             self._emit_progress(
                 progress,
@@ -636,8 +652,14 @@ class SessionManager:
         *,
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
+        input_role: Literal["user", "system"] = "user",
     ) -> str:
-        return self.get(session_id).run(user_input, progress=progress, cancellation=cancellation)
+        return self.get(session_id).run(
+            user_input,
+            progress=progress,
+            cancellation=cancellation,
+            input_role=input_role,
+        )
 
     def sessions(self) -> tuple[ConversationSession, ...]:
         """Return sessions in stable UUID order for interactive status displays."""

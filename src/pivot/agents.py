@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -62,6 +63,8 @@ class AgentRecord:
     error: str | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    cancellation: CancellationToken | None = field(default=None, repr=False)
+    future: Future[Any] | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
         state = self.session.state.value if self.role == AgentRole.MAIN else self.state.value
@@ -95,6 +98,7 @@ class AgentControl:
         event_service: EventService,
         executors: ExecutorRegistry,
         max_rounds: int,
+        max_workers: int = 4,
     ) -> None:
         self.main_agent = main_agent
         self.llm = llm
@@ -104,6 +108,8 @@ class AgentControl:
         self.event_service = event_service
         self.executors = executors
         self.max_rounds = max_rounds
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="pivot-agent")
+        self._completion_handler: Callable[[AgentRecord], None] | None = None
         self._records: dict[str, AgentRecord] = {
             main_agent.session_id: AgentRecord(
                 main_agent.session_id,
@@ -117,6 +123,42 @@ class AgentControl:
         }
         self._lock = threading.RLock()
         main_agent.configure_agent(role=AgentRole.MAIN.value, name="main", control=self, executors=executors)
+
+    def set_completion_handler(self, handler: Callable[[AgentRecord], None] | None) -> None:
+        """Receive worker terminal states for reinjection into the main-agent mailbox."""
+
+        with self._lock:
+            self._completion_handler = handler
+
+    def close(self) -> None:
+        """Cancel active workers and release worker execution threads."""
+
+        self.cancel_workers()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def cancel_workers(self) -> bool:
+        """Cooperatively cancel every running worker."""
+
+        cancelled = False
+        with self._lock:
+            records = tuple(self._records.values())
+        for record in records:
+            if record.role == AgentRole.WORKER and record.state == AgentState.RUNNING and record.cancellation:
+                record.cancellation.cancel()
+                cancelled = True
+        return cancelled
+
+    def wait(self, agent_id: str, *, timeout: float | None = None) -> AgentRecord:
+        """Wait for one worker in tests or application supervision code."""
+
+        record = self.get(agent_id)
+        future = record.future
+        if future is not None:
+            try:
+                future.result(timeout=timeout)
+            except Exception:
+                pass
+        return self.get(agent_id)
 
     @property
     def main_agent_id(self) -> str:
@@ -149,7 +191,7 @@ class AgentControl:
                     "name": "agent.delegate",
                     "description": (
                         "Create a worker, assign a task plus explicit capability and event scopes, "
-                        "wait for its report, and return that report."
+                        "and return immediately. The worker result will resume the main agent through its mailbox."
                     ),
                     "arguments": ["task", "name?", "capabilities?", "events?"],
                 },
@@ -160,7 +202,7 @@ class AgentControl:
                 },
                 {
                     "name": "agent.assign",
-                    "description": "Assign a task to an existing worker and wait for its report.",
+                    "description": "Assign a task asynchronously to an existing worker.",
                     "arguments": ["agent_id", "task"],
                 },
             ]
@@ -281,6 +323,7 @@ class AgentControl:
         cancellation: CancellationToken | None,
         progress: ProgressCallback | None,
     ) -> dict[str, Any]:
+        token = cancellation or CancellationToken()
         with self._lock:
             if record.role != AgentRole.WORKER or record.parent_id != self.main_agent_id:
                 raise AgentControlError("Tasks can only be assigned to workers owned by the main agent")
@@ -291,7 +334,20 @@ class AgentControl:
             record.report = None
             record.error = None
             record.updated_at = time.time()
+            record.cancellation = token
         self._emit(progress, "agent_started", record, f"Delegated task to {record.name}.")
+
+        record.future = self._executor.submit(self._run_assigned, record, task, token, progress)
+        return {"accepted": True, "agent": record.as_dict()}
+
+    def _run_assigned(
+        self,
+        record: AgentRecord,
+        task: str,
+        cancellation: CancellationToken,
+        progress: ProgressCallback | None,
+    ) -> None:
+        """Execute an assigned worker without occupying the main-agent activation."""
 
         def child_progress(update: SessionProgress) -> None:
             self._emit(
@@ -309,21 +365,31 @@ class AgentControl:
                 record.state = AgentState.CANCELLED
                 record.updated_at = time.time()
             self._emit(progress, "agent_failed", record, f"{record.name} was cancelled.")
-            raise
         except Exception as exc:
             with self._lock:
                 record.state = AgentState.FAILED
                 record.error = f"{type(exc).__name__}: {exc}"
                 record.updated_at = time.time()
             self._emit(progress, "agent_failed", record, f"{record.name} failed: {record.error}")
-            raise AgentControlError(f"Worker {record.name} failed: {record.error}") from exc
-        with self._lock:
-            record.state = AgentState.COMPLETED
-            record.updated_at = time.time()
-            result = record.report if record.report is not None else response
-            record.report = result
-        self._emit(progress, "agent_completed", record, f"{record.name} reported a result.")
-        return {"agent": record.as_dict(), "result": result}
+        else:
+            with self._lock:
+                record.state = AgentState.COMPLETED
+                record.updated_at = time.time()
+                result = record.report if record.report is not None else response
+                record.report = result
+            self._emit(progress, "agent_completed", record, f"{record.name} reported a result.")
+        finally:
+            with self._lock:
+                handler = self._completion_handler
+            if handler is not None:
+                try:
+                    handler(record)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Worker completion handler failed agent_id=%s error_type=%s",
+                        record.agent_id,
+                        type(exc).__name__,
+                    )
 
     def _report(self, session: ConversationSession, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if set(arguments) != {"result"}:

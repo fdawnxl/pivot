@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +17,7 @@ from pivot.events import EventDescriptor, EventPool, EventService, EventSupervis
 from pivot.executors import ExecutorError, ExecutorRegistry, ShellExecutor
 from pivot.memory import TextMemory
 from pivot.models import CapabilityDescriptor, ParsedResponse, ToolCall
-from pivot.runtime import Runtime
+from pivot.runtime import PivotClient, Runtime
 from pivot.session import ConversationSession, SessionManager
 
 
@@ -99,10 +101,11 @@ class DelegatingLLM:
         assert any(tool["function"]["name"] == ACTION_TOOL for tool in tools)
         tool_messages = [message for message in messages if message.role == "tool"]
         if context["agent"]["role"] == "main":
+            assert all(tool["function"]["name"] != "pivot_wait_event" for tool in tools)
             if tool_messages:
                 result = json.loads(tool_messages[-1].content)
-                assert result["result"] == {"finding": "scoped work complete"}
-                return {"choices": [{"message": {"content": "Main agent synthesized the worker report."}}]}
+                assert result["accepted"] is True
+                return {"choices": [{"message": {"content": "Worker task accepted."}}]}
             action = {
                 "kind": "control",
                 "name": "agent.delegate",
@@ -117,6 +120,7 @@ class DelegatingLLM:
 
         assert [item["name"] for item in context["capabilities"]] == ["echo"]
         assert [item["name"] for item in context["events"]] == ["ready"]
+        assert any(tool["function"]["name"] == "pivot_wait_event" for tool in tools)
         if not tool_messages:
             return _action_response(
                 {"kind": "capability", "name": "echo", "arguments": {"value": "checked"}},
@@ -201,18 +205,145 @@ def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) ->
 
     response = runtime.agents.main_agent.run("Handle this", progress=updates.append)
 
-    assert response == "Main agent synthesized the worker report."
+    assert response == "Worker task accepted."
     records = runtime.agents.records()
     assert len(records) == 2
     worker = records[1]
+    worker = runtime.agents.wait(worker.agent_id, timeout=2)
     assert worker.capabilities == ("echo",)
     assert worker.events == ("ready",)
     assert worker.report == {"finding": "scoped work complete"}
     assert worker.state == "completed"
     assert "agent_started" in [update.kind for update in updates]
-    assert "agent_completed" in [update.kind for update in updates]
     with pytest.raises(AgentControlError, match="Unknown assigned capabilities"):
         runtime.agents.invoke_main(
             "agent.create",
             {"capabilities": ["missing"], "events": []},
         )
+
+
+def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class BlockingWorkerLLM:
+        def complete(self, messages, *, tools=()):
+            context = json.loads(messages[0].content.split("\n", 1)[1])
+            assert context["agent"]["role"] == "worker"
+            worker_started.set()
+            release_worker.wait(timeout=2)
+            return {"choices": [{"message": {"content": "worker result"}}]}
+
+    registry = CapabilityRegistry()
+    events = EventPool()
+    service = EventService(events, EventSupervisor(events, None))
+    executors = ExecutorRegistry()
+    executors.register(ShellExecutor(tmp_path, timeout=2))
+    main = ConversationSession(
+        str(uuid4()),
+        llm=BlockingWorkerLLM(),
+        capabilities=registry,
+        memory=TextMemory(tmp_path / "memory"),
+        events=events,
+        event_service=service,
+        executors=executors,
+    )
+    agents = AgentControl(
+        main,
+        llm=BlockingWorkerLLM(),
+        capabilities=registry,
+        child_memory=TextMemory(tmp_path / "memory" / "agents"),
+        events=events,
+        event_service=service,
+        executors=executors,
+        max_rounds=2,
+    )
+
+    assignment = agents.invoke_main(
+        "agent.delegate",
+        {"task": "wait for release", "capabilities": [], "events": []},
+    )
+    assert assignment["accepted"] is True
+    assert worker_started.wait(timeout=1)
+    worker_id = assignment["agent"]["agent_id"]
+    assert agents.get(worker_id).state == "running"
+
+    release_worker.set()
+    worker = agents.wait(worker_id, timeout=2)
+    assert worker.state == "completed"
+    assert worker.report == "worker result"
+    agents.close()
+
+
+def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
+    class CompletionLLM:
+        def complete(self, messages, *, tools=()):
+            context = json.loads(messages[0].content.split("\n", 1)[1])
+            if context["agent"]["role"] == "worker":
+                return {"choices": [{"message": {"content": "worker evidence"}}]}
+            assert any(
+                message.role == "system" and "worker_completion" in str(message.content)
+                for message in messages[1:]
+            )
+            return {"choices": [{"message": {"content": "worker evidence integrated"}}]}
+
+    llm = CompletionLLM()
+    registry = CapabilityRegistry()
+    events = EventPool()
+    service = EventService(events, EventSupervisor(events, None))
+    executors = ExecutorRegistry()
+    executors.register(ShellExecutor(tmp_path, timeout=2))
+    memory = TextMemory(tmp_path / "memory")
+    sessions = SessionManager(
+        llm=llm,
+        capabilities=registry,
+        memory=memory,
+        events=events,
+        event_service=service,
+        executors=executors,
+    )
+    main = sessions.get(str(uuid4()))
+    agents = AgentControl(
+        main,
+        llm=llm,
+        capabilities=registry,
+        child_memory=TextMemory(tmp_path / "memory" / "agents"),
+        events=events,
+        event_service=service,
+        executors=executors,
+        max_rounds=2,
+    )
+    runtime = Runtime(
+        PivotConfig(tmp_path, ProviderCredential("test", "test-model")),
+        registry,
+        events,
+        service,
+        sessions,
+        None,
+        executors,
+        agents,
+    )
+    client = PivotClient(runtime)
+    try:
+        delegated = client.control.submit(
+            "agent.delegate",
+            {"task": "collect evidence", "capabilities": [], "events": []},
+        )
+        assert client.control.wait_task(delegated, timeout=2).state == "completed"
+        worker = agents.records()[1]
+        agents.wait(worker.agent_id, timeout=2)
+
+        deadline = time.monotonic() + 2
+        completion_task = None
+        while time.monotonic() < deadline:
+            candidates = [task for task in client.control.tasks() if task.operation == "session.send"]
+            if candidates:
+                completion_task = client.control.wait_task(candidates[-1].task_id, timeout=0.2)
+                if completion_task.state not in {"queued", "running"}:
+                    break
+            time.sleep(0.01)
+        assert completion_task is not None
+        assert completion_task.state == "completed"
+        assert main.history[-1].content == "worker evidence integrated"
+    finally:
+        client.close()

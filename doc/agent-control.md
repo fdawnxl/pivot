@@ -4,7 +4,7 @@
 
 Each pivot instance has one stable main-agent UUID derived from its resolved instance path. CLI, TUI, `PivotClient.run_main`, and the compatibility session methods all route user messages to this agent. Delegated workers are internal agents with separate histories under `memory/agents/<worker-uuid>/history.jsonl`; they are observable but never selectable as user conversations.
 
-The main agent can solve a request directly or invoke `agent.delegate`. A delegate request contains a task and explicit capability/event allowlists:
+The main agent can solve a request directly or invoke asynchronous `agent.delegate`. A delegate request contains a task and explicit capability/event allowlists:
 
 ```json
 {
@@ -19,7 +19,7 @@ The main agent can solve a request directly or invoke `agent.delegate`. A delega
 }
 ```
 
-Omitted allowlists are empty. An unknown capability or event rejects worker creation. Workers cannot create other workers. They can invoke `agent.report` with any JSON-serializable result, after which the main agent receives the report as its control action result and remains responsible for the user-facing answer.
+Omitted allowlists are empty. An unknown capability or event rejects worker creation. Workers cannot create other workers. They can invoke `agent.report` with any JSON-serializable result. Delegation returns an accepted worker snapshot immediately; after the worker reaches a terminal state, its report or error is submitted as an internal main-agent mailbox item. The main agent remains responsible for any later user-facing update.
 
 ## Unified model action protocol
 
@@ -58,7 +58,7 @@ agent.delegate  {task, name?, capabilities?, events?}
 agent.report    {result}                              # worker only
 ```
 
-`agent.delegate` is the normal main-agent operation. It combines create, assign, synchronous bounded execution, and report delivery. The same create/assign/list/get operations are exported through `PivotControl` and therefore through generic D-Bus `Invoke` calls.
+`agent.delegate` is the normal main-agent operation. It combines create and asynchronous assignment; report delivery is a later mailbox activation. The same create/assign/list/get operations are exported through `PivotControl` and therefore through generic D-Bus `Invoke` calls.
 
 Main-turn cancellation is passed into the active worker. Model and subprocess requests remain cooperative: cancellation takes effect at their next safe return boundary, while event polling checks it directly.
 

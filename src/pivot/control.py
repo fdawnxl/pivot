@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from .models import Message, ToolCall, normalize_content
@@ -111,6 +111,8 @@ class PivotControl:
         self._selected_session_id = initial_session.session_id if initial_session else None
         self._lock = threading.RLock()
         self._closed = False
+        if runtime.agents is not None:
+            runtime.agents.set_completion_handler(self._on_worker_completion)
         self._register_builtin_operations()
 
     @property
@@ -251,6 +253,26 @@ class PivotControl:
         resolved = self.get_session(session_id).session_id
         return self.submit("session.send", {"session_id": resolved, "message": message})
 
+    def _on_worker_completion(self, record: Any) -> None:
+        """Resume the main agent after an asynchronously delegated worker finishes."""
+
+        payload = {
+            "type": "worker_completion",
+            "agent": record.as_dict(),
+            "instruction": "Review this worker outcome and update the user if it changes the result.",
+        }
+        try:
+            self.submit(
+                "session.send",
+                {
+                    "session_id": self.get_session().session_id,
+                    "message": "pivot internal worker completion:\n" + json.dumps(payload, ensure_ascii=False, default=str),
+                    "_input_role": "system",
+                },
+            )
+        except ControlError:
+            LOGGER.info("Worker completion arrived after control shutdown agent_id=%s", record.agent_id)
+
     def run(
         self,
         session_id: str,
@@ -281,6 +303,7 @@ class PivotControl:
         *,
         progress: ProgressCallback | None = None,
         task: ControlTask | None = None,
+        input_role: Literal["user", "system"] = "user",
     ) -> str:
         """Run one main-agent request at its reserved FIFO position."""
 
@@ -295,6 +318,7 @@ class PivotControl:
                     user_input,
                     progress=progress,
                     cancellation=token,
+                    input_role=input_role,
                 ),
                 on_started=(lambda: self._mark_task_running(task)) if task is not None else None,
             )
@@ -356,6 +380,8 @@ class PivotControl:
         for task in self.tasks():
             if task.session_id == resolved and task.state in {ControlTaskState.QUEUED, ControlTaskState.RUNNING}:
                 cancelled = self.cancel_task(task.task_id) or cancelled
+        if self.runtime.agents is not None:
+            cancelled = self.runtime.agents.cancel_workers() or cancelled
         return cancelled
 
     def runtime_snapshot(self) -> dict[str, Any]:
@@ -453,6 +479,7 @@ class PivotControl:
             task.cancellation,
             task.queue_sequence,
             task=task,
+            input_role="system" if task.arguments.get("_input_role") == "system" else "user",
         )
         return {"session_id": session.session_id, "response": response}
 
