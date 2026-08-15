@@ -35,22 +35,20 @@ def test_action_detector_normalizes_fixed_text_protocol() -> None:
     assert detected.actions[0].call.name == ACTION_TOOL
 
 
-@pytest.mark.parametrize("kind", ["think", "measure", "work"])
-def test_action_detector_normalizes_capability_kind_aliases(kind: str) -> None:
-    response = ParsedResponse(
-        tool_calls=(
-            ToolCall(
-                ACTION_TOOL,
-                {"kind": kind, "name": "linux_package_runbook", "arguments": {"operation": "search"}},
-                "alias-call",
-            ),
+def test_action_detector_normalizes_capability_kind_aliases() -> None:
+    for kind in ("think", "measure", "work"):
+        response = ParsedResponse(
+            tool_calls=(
+                ToolCall(
+                    ACTION_TOOL,
+                    {"kind": kind, "name": "linux_package_runbook", "arguments": {"operation": "search"}},
+                    "alias-call",
+                ),
+            )
         )
-    )
-
-    detected = ActionDetector().detect(response)
-
-    assert detected.actions[0].kind == ActionKind.CAPABILITY
-    assert detected.actions[0].name == "linux_package_runbook"
+        detected = ActionDetector().detect(response)
+        assert detected.actions[0].kind == ActionKind.CAPABILITY
+        assert detected.actions[0].name == "linux_package_runbook"
 
 
 def test_shell_executor_uses_instance_cwd_and_controlled_output(tmp_path: Path) -> None:

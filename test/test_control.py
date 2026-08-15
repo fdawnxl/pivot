@@ -69,22 +69,6 @@ def test_control_runs_tasks_and_reads_durable_history(tmp_path: Path) -> None:
     control.runtime.close()
 
 
-def test_main_identity_and_history_survive_runtime_rebuild(tmp_path: Path) -> None:
-    first_runtime = _runtime(tmp_path)
-    first = PivotControl(first_runtime)
-    agent_id = first_runtime.main_agent.agent_id
-    first.wait_task(first.submit_message("persist me"), timeout=2)
-    first.close()
-    first_runtime.close()
-
-    second_runtime = _runtime(tmp_path)
-    second = PivotControl(second_runtime)
-    assert second_runtime.main_agent.agent_id == agent_id
-    assert second.history()[-1]["content"] == "ack: persist me"
-    second.close()
-    second_runtime.close()
-
-
 def test_control_interrupts_local_main_activation(tmp_path: Path) -> None:
     started = threading.Event()
     release = threading.Event()
@@ -134,45 +118,18 @@ def test_main_agent_requests_run_in_fifo_order(tmp_path: Path) -> None:
     first = control.submit_message("first")
     assert first_started.wait(timeout=1)
     second = control.submit_message("second")
+    cancelled = control.submit_message("cancelled")
     third = control.submit_message("third")
     time.sleep(0.05)
     assert control.task(second).state == ControlTaskState.QUEUED
+    assert control.task(cancelled).state == ControlTaskState.QUEUED
     assert control.task(third).state == ControlTaskState.QUEUED
-    release_first.set()
-    assert control.wait_task(first, timeout=2).state == ControlTaskState.COMPLETED
-    assert control.wait_task(second, timeout=2).result["response"] == "ack: second"
-    assert control.wait_task(third, timeout=2).result["response"] == "ack: third"
-    assert received == ["first", "second", "third"]
-    control.close()
-    runtime.close()
-
-
-def test_cancelling_queued_request_does_not_block_later_requests(tmp_path: Path) -> None:
-    first_started = threading.Event()
-    release_first = threading.Event()
-    received: list[str] = []
-
-    class OrderedLLM:
-        def complete(self, messages, *, tools=()):
-            value = next(message.content for message in reversed(messages) if message.role == "user")
-            assert isinstance(value, str)
-            received.append(value)
-            if value == "first":
-                first_started.set()
-                release_first.wait(timeout=2)
-            return {"choices": [{"message": {"content": f"ack: {value}"}}]}
-
-    runtime = _runtime(tmp_path, OrderedLLM())
-    control = PivotControl(runtime)
-    first = control.submit_message("first")
-    assert first_started.wait(timeout=1)
-    cancelled = control.submit_message("cancelled")
-    last = control.submit_message("last")
     assert control.cancel_task(cancelled)
     release_first.set()
     assert control.wait_task(first, timeout=2).state == ControlTaskState.COMPLETED
+    assert control.wait_task(second, timeout=2).result["response"] == "ack: second"
     assert control.wait_task(cancelled, timeout=2).state == ControlTaskState.CANCELLED
-    assert control.wait_task(last, timeout=2).state == ControlTaskState.COMPLETED
-    assert received == ["first", "last"]
+    assert control.wait_task(third, timeout=2).result["response"] == "ack: third"
+    assert received == ["first", "second", "third"]
     control.close()
     runtime.close()

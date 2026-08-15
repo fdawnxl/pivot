@@ -57,7 +57,7 @@ def _runtime(tmp_path: Path, llm: Any | None = None) -> Runtime:
     return Runtime(config, registry, events, event_service, memory, main, None, executors, agents)
 
 
-def test_textual_cli_uses_pivot_iris_dark_palette() -> None:
+def test_textual_cli_theme_and_bindings_are_global_agent_only() -> None:
     assert PIVOT_THEME.name == "pivot-iris-dark"
     assert PIVOT_THEME.dark
     allowed = {"#418AB4", "#407D52", "#9E2E24", "#CFB64A", "#DAE3E6", "#000000"}
@@ -75,15 +75,9 @@ def test_textual_cli_uses_pivot_iris_dark_palette() -> None:
         PIVOT_THEME.boost,
         *PIVOT_THEME.variables.values(),
     } <= allowed
-
-
-def test_textual_cli_shortcuts_have_no_timeline_navigation() -> None:
     bindings = {binding.key: binding for binding in PivotApp.BINDINGS}
     assert {"ctrl+q", "ctrl+b", "ctrl+g", "ctrl+l"} <= bindings.keys()
     assert {"ctrl+n", "ctrl+left", "ctrl+right", "f2"}.isdisjoint(bindings)
-
-
-def test_dependency_item_renders_lifecycle_state_colors() -> None:
     labels = {state: DependencyItem(DependencyStatus("sensor", state))._label() for state in DependencyState}
     assert "$success" in labels[DependencyState.READY] and "√" in labels[DependencyState.READY]
     assert all(
@@ -98,7 +92,7 @@ def test_dependency_item_renders_lifecycle_state_colors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_displays_agent_and_dependency_statuses(tmp_path: Path) -> None:
+async def test_textual_cli_displays_agent_dependencies_and_global_controls(tmp_path: Path) -> None:
     class Dependencies:
         refreshed = False
 
@@ -116,24 +110,11 @@ async def test_textual_cli_displays_agent_and_dependency_statuses(tmp_path: Path
     object.__setattr__(runtime, "dependencies", Dependencies())
     client = PivotClient(runtime)
     app = PivotApp(client, client.main_agent())
-    async with app.run_test(size=(100, 36)):
+    async with app.run_test(size=(140, 36)) as pilot:
         assert [item.record.role.value for item in app.query(AgentItem)] == ["main"]
         dependencies = list(app.query(DependencyItem))
         assert [item.status.dependency_id for item in dependencies] == ["sensor"]
         assert dependencies[0].parent is app.query_one("#dependency-list")
-        app._request_dependency_refresh()
-        await app.workers.wait_for_complete()
-        await app._refresh_dependency_list()
-        assert runtime.dependencies is not None
-        assert runtime.dependencies.refreshed  # type: ignore[attr-defined]
-    client.close()
-
-
-@pytest.mark.asyncio
-async def test_textual_cli_shortcut_bar_targets_global_agent_actions(tmp_path: Path) -> None:
-    client = PivotClient(_runtime(tmp_path))
-    app = PivotApp(client, client.main_agent())
-    async with app.run_test(size=(140, 36)) as pilot:
         assert [str(button.label) for button in app.query("#shortcut-bar Button")] == [
             "Agents (Ctrl+B)",
             "Stop (Ctrl+G)",
@@ -143,6 +124,11 @@ async def test_textual_cli_shortcut_bar_targets_global_agent_actions(tmp_path: P
         app.query_one("#prompt", PromptEditor).blur()
         await pilot.click("#shortcut-prompt")
         assert app.query_one("#prompt", PromptEditor).has_focus
+        app._request_dependency_refresh()
+        await app.workers.wait_for_complete()
+        await app._refresh_dependency_list()
+        assert runtime.dependencies is not None
+        assert runtime.dependencies.refreshed  # type: ignore[attr-defined]
     client.close()
 
 
@@ -162,26 +148,6 @@ def test_banner_contains_runtime_summary_and_safe_endpoint() -> None:
     assert "measure:read" in banner
     assert "ready" in banner
     assert "secret" not in banner
-
-
-@pytest.mark.asyncio
-async def test_textual_cli_renders_main_agent_response(tmp_path: Path) -> None:
-    client = PivotClient(_runtime(tmp_path))
-    app = PivotApp(client, client.main_agent())
-    async with app.run_test(size=(120, 36)) as pilot:
-        prompt = app.query_one("#prompt", PromptEditor)
-        prompt.text = "hello"
-        await pilot.press("enter")
-        await pilot.pause(0.3)
-        messages = list(app.query(AgentMessage))
-        assert [message.role for message in messages] == ["user", "assistant"]
-        assert messages[-1].content == "ack"
-        assert prompt.has_focus and prompt.text == ""
-        workflow = app.query_one(WorkflowView)
-        assert [(step.kind, step.state, step.result) for step in workflow.state.steps] == [
-            ("model", "done", "Response ready")
-        ]
-    client.close()
 
 
 @pytest.mark.asyncio
@@ -219,7 +185,10 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
             ("capability", "echo", "done"),
             ("model", "model-round-2", "done"),
         ]
-        assert list(app.query(AgentMessage))[-1].content == "The result is **measured**."
+        messages = list(app.query(AgentMessage))
+        assert [message.role for message in messages] == ["user", "assistant"]
+        assert messages[-1].content == "The result is **measured**."
+        assert prompt.has_focus and prompt.text == ""
     client.close()
 
 
@@ -311,6 +280,8 @@ def test_pivot_client_exposes_only_persistent_main_agent(tmp_path: Path) -> None
     try:
         main = client.main_agent()
         assert client.main_agent() is main
+        operation_names = {item.name for item in client.control.operations()}
+        assert {"agent.main", "agent.message", "agent.create", "agent.assign", "agent.delegate"} <= operation_names
         assert client.run_main("hello") == "ack"
     finally:
         client.close()

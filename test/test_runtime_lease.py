@@ -20,12 +20,6 @@ def test_runtime_lease_allows_only_one_owner_per_instance(tmp_path: Path) -> Non
 
     second.acquire()
     assert second.acquired
+    second.acquire()
     second.release()
-
-
-def test_runtime_lease_is_idempotent(tmp_path: Path) -> None:
-    lease = RuntimeLease(tmp_path)
-    lease.acquire()
-    lease.acquire()
-    lease.release()
-    lease.release()
+    second.release()

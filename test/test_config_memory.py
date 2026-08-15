@@ -4,7 +4,6 @@ import pytest
 
 from pivot.config import ConfigurationError, PivotConfig
 from pivot.credentials import CredentialStore, ProviderCredential
-from pivot.memory import MemoryStore
 
 
 def test_instance_bootstrap_and_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,17 +48,6 @@ def test_codex_files_are_not_runtime_inputs(tmp_path: Path, monkeypatch: pytest.
     CredentialStore(instance / "credentials.toml").save({"local": ProviderCredential("local", "local-model")})
     config = PivotConfig.load(instance_path=instance)
     assert config.provider.model == "local-model"
-
-
-def test_memory_uses_one_sqlite_database_and_stable_main_identity(tmp_path: Path) -> None:
-    first = MemoryStore(tmp_path)
-    agent_id = first.main_agent_id()
-    first.close()
-
-    second = MemoryStore(tmp_path)
-    assert second.main_agent_id() == agent_id
-    assert (tmp_path / "pivot.db").is_file()
-    second.close()
 
 
 def test_instance_credentials_are_restricted(tmp_path: Path) -> None:

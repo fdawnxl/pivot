@@ -45,8 +45,14 @@ def test_activation_executes_tools_and_persists_in_sqlite(tmp_path: Path) -> Non
     memory = MemoryStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     agent = PersistentAgent(agent_id, llm=ToolLLM(), capabilities=registry, memory=memory, max_rounds=3)
-    assert agent.activate("hello") == "finished"
+    updates = []
+    assert agent.activate("hello", progress=updates.append) == "finished"
     assert [message.role for message in agent.history] == ["user", "assistant", "tool", "assistant"]
+    kinds = [update.kind for update in updates]
+    assert kinds[0] == "activation_started"
+    assert "capability_completed" in kinds
+    assert kinds[-1] == "activation_completed"
+    assert all(update.agent_id == agent.agent_id and update.activation_id for update in updates)
 
     restored = PersistentAgent(agent_id, llm=ToolLLM(), capabilities=registry, memory=memory, max_rounds=3)
     assert restored.history == agent.history
@@ -95,21 +101,6 @@ def test_activation_state_tracks_running_and_ready(tmp_path: Path) -> None:
     release.set()
     thread.join(timeout=2)
     assert agent.state == ActivationState.READY
-    memory.close()
-
-
-def test_activation_emits_safe_progress(tmp_path: Path) -> None:
-    registry = CapabilityRegistry()
-    registry.register(CapabilityDescriptor("echo", "work", "Echo", {"type": "object"}), lambda value: value)
-    memory = MemoryStore(tmp_path / "memory")
-    agent = PersistentAgent(memory.main_agent_id(), llm=ToolLLM(), capabilities=registry, memory=memory, max_rounds=3)
-    updates = []
-    assert agent.activate("hello", progress=updates.append) == "finished"
-    kinds = [update.kind for update in updates]
-    assert kinds[0] == "activation_started"
-    assert "capability_completed" in kinds
-    assert kinds[-1] == "activation_completed"
-    assert all(update.agent_id == agent.agent_id and update.activation_id for update in updates)
     memory.close()
 
 
@@ -179,25 +170,8 @@ def test_isolated_event_runner_discovers_and_polls_source(tmp_path: Path) -> Non
     descriptors = runner.list_events(script)
     assert descriptors[0].name == "temperature"
     assert runner.poll(script) == {"temperature": 42}
-
-
-def test_event_runner_rejects_missing_source(tmp_path: Path) -> None:
-    environment = tmp_path / "environment"
-    environment.mkdir()
-    (environment / "pyproject.toml").write_text(
-        '[project]\nname="event-test"\nversion="0.1.0"\nrequires-python=">=3.11"\ndependencies=[]\n',
-        encoding="utf-8",
-    )
     with pytest.raises(EventError, match="does not exist"):
         EventScriptRunner(environment, instance=tmp_path).poll(tmp_path / "missing.py")
-
-
-class ImmediateSupervisor:
-    def __init__(self, pool: EventPool) -> None:
-        self.pool = pool
-
-    def poll_once(self):
-        return self.pool.report_source("/event.py", {"temperature": 42})
 
 
 class EventLLM:
@@ -228,28 +202,7 @@ class EventLLM:
         return {"choices": [{"message": {"content": "Temperature reached the threshold."}}]}
 
 
-def test_worker_event_completion_resumes_activation(tmp_path: Path) -> None:
-    pool = EventPool()
-    pool.register(_temperature_event())
-    service = EventService(pool, ImmediateSupervisor(pool), poll_interval=0.01, sleeper=lambda _: None)  # type: ignore[arg-type]
-    memory = MemoryStore(tmp_path / "memory")
-    worker_id = memory.create_worker(name="waiter", parent_id=memory.main_agent_id(), capabilities=(), events=("monitor_temperature",))
-    agent = PersistentAgent(
-        worker_id,
-        llm=EventLLM(),
-        capabilities=CapabilityRegistry(),
-        memory=memory,
-        events=pool,
-        event_service=service,
-        event_names=("monitor_temperature",),
-        role="worker",
-        name="waiter",
-    )
-    assert agent.activate("wait", source="delegation") == "Temperature reached the threshold."
-    memory.close()
-
-
-def test_worker_state_is_pending_during_event_wait(tmp_path: Path) -> None:
+def test_worker_event_wait_is_pending_then_resumes(tmp_path: Path) -> None:
     pool = EventPool()
     pool.register(_temperature_event())
     waiting = threading.Event()
@@ -275,13 +228,17 @@ def test_worker_state_is_pending_during_event_wait(tmp_path: Path) -> None:
         role="worker",
         name="waiter",
     )
-    thread = threading.Thread(target=agent.activate, args=("wait",), kwargs={"source": "delegation"})
+    result: list[str] = []
+    thread = threading.Thread(
+        target=lambda: result.append(agent.activate("wait", source="delegation")),
+    )
     thread.start()
     assert waiting.wait(timeout=1)
     assert agent.state == ActivationState.PENDING
     release.set()
     thread.join(timeout=2)
     assert agent.state == ActivationState.READY
+    assert result == ["Temperature reached the threshold."]
     memory.close()
 
 
