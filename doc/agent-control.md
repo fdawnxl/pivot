@@ -1,10 +1,10 @@
 # Agent control, actions, and executors
 
-## Main-agent ownership
+## Main-Agent ownership
 
-Each pivot instance has one stable main-agent UUID derived from its resolved instance path. CLI, TUI, `PivotClient.run_main`, and the compatibility session methods all route user messages to this agent. Delegated workers are internal agents with separate histories under `memory/agents/<worker-uuid>/history.jsonl`; they are observable but never selectable as user conversations.
+Each pivot instance has one stable main-Agent UUID stored in `memory/pivot.db`. CLI, TUI, `PivotClient.run_main`, and D-Bus `SendMessage` all route user input to this Agent. Delegated workers have separate identities and activation histories in the same database; they are observable but never selectable as user endpoints.
 
-The main agent can solve a request directly or invoke asynchronous `agent.delegate`. A delegate request contains a task and explicit capability/event allowlists:
+The main Agent can solve a request directly or invoke asynchronous `agent.delegate`:
 
 ```json
 {
@@ -19,7 +19,7 @@ The main agent can solve a request directly or invoke asynchronous `agent.delega
 }
 ```
 
-Omitted allowlists are empty. An unknown capability or event rejects worker creation. Workers cannot create other workers. They can invoke `agent.report` with any JSON-serializable result. Delegation returns an accepted worker snapshot immediately; after the worker reaches a terminal state, its report or error is submitted as an internal main-agent mailbox item. The main agent remains responsible for any later user-facing update.
+Omitted allowlists are empty. An unknown capability or event rejects worker creation. Workers cannot create other workers. They can invoke `agent.report` with any JSON-serializable result. Delegation returns an accepted worker snapshot immediately; after the worker reaches a terminal state, its report or error is submitted as an internal main-Agent mailbox item. The main Agent remains responsible for later user-facing updates.
 
 ## Unified model action protocol
 
@@ -27,7 +27,7 @@ The preferred provider tool is `pivot_action`. Every request has exactly three f
 
 ```json
 {
-  "kind": "capability | event | control | executor",
+  "kind": "capability | event | control | executor | memory",
   "name": "operation-name",
   "arguments": {}
 }
@@ -43,11 +43,11 @@ For models without native tool calling, the detector accepts the same JSON in ei
 {"kind":"event","name":"wait","arguments":{"event":"ready","operator":"==","expected":true,"timeout":30}}
 ```
 
-The detector removes the envelope from user-facing text, synthesizes an ordinary tool call when needed, and routes all four action kinds through the same session path. Existing native capability tools, `pivot_wait_event`, and `pivot_execute_shell` remain compatibility aliases and are normalized before execution.
+The detector removes the envelope from user-facing text, synthesizes an ordinary tool call when needed, and routes all action kinds through the activation core. Direct capability tools, `pivot_wait_event`, and executor tools are normalized into the same route.
 
-## Internal control operations
+## Agent operations
 
-The agent-facing control surface provides:
+The Agent-facing control surface provides:
 
 ```text
 agent.list
@@ -58,9 +58,21 @@ agent.delegate  {task, name?, capabilities?, events?}
 agent.report    {result}                              # worker only
 ```
 
-`agent.delegate` is the normal main-agent operation. It combines create and asynchronous assignment; report delivery is a later mailbox activation. The same create/assign/list/get operations are exported through `PivotControl` and therefore through generic D-Bus `Invoke` calls.
+`agent.delegate` combines create and asynchronous assignment; report delivery is a later mailbox activation. Main activation completion does not wait for the worker. Long event waits are therefore assigned to workers, while the main Agent remains available for queued user input.
 
-Main-turn cancellation is passed into the active worker. Model and subprocess requests remain cooperative: cancellation takes effect at their next safe return boundary, while event polling checks it directly.
+Cancellation is cooperative. Model and subprocess requests stop at their next safe return boundary, while event polling checks cancellation directly. Runtime shutdown cancels active work and waits for Agent cleanup before closing durable memory.
+
+## Memory operations
+
+The same action protocol exposes:
+
+```text
+memory.remember {kind, content, confidence?, valid_for?, supersedes?}
+memory.recall   {query, limit?}
+memory.forget   {memory_id}
+```
+
+These operations target the calling Agent's namespace. Stored records keep their source, confidence, validity, sensitivity, and supersession metadata. Full details are in [memory](memory.md).
 
 ## Executors
 
