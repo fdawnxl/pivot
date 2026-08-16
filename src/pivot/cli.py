@@ -105,7 +105,9 @@ def _wait_for_shutdown(client: PivotClient) -> None:
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous[signum] = signal.signal(signum, request_stop)
     unsubscribe = client.control.subscribe(
-        lambda event, _payload: stopped.set() if event == "shutdown_requested" else None
+        lambda event, _payload: stopped.set()
+        if event in {"shutdown_requested", "reload_requested"}
+        else None
     )
     LOGGER.info("D-Bus-only control process is ready")
     try:

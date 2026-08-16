@@ -1,4 +1,4 @@
-"""D-Bus transport for the shared pivot control surface."""
+"""D-Bus transport for framework lifecycle control and unified stimulus ingress."""
 
 from __future__ import annotations
 
@@ -22,22 +22,20 @@ _DBUS_SERVICE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]
 
 
 class ControlDBusError(RuntimeError):
-    """Raised when the D-Bus control service cannot start or stop safely."""
+    """Raised when the framework D-Bus service cannot start or stop safely."""
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
-def _arguments(value: str) -> dict[str, Any]:
-    if not value:
-        return {}
+def _envelope(value: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise ControlError(f"Arguments contain invalid JSON: {exc.msg}") from exc
+        raise ControlError(f"Stimulus envelope contains invalid JSON: {exc.msg}") from exc
     if not isinstance(parsed, Mapping):
-        raise ControlError("Arguments JSON must be an object")
+        raise ControlError("Stimulus envelope JSON must be an object")
     return dict(parsed)
 
 
@@ -58,7 +56,7 @@ def _service_interface(control: PivotControl) -> Any:
             except ControlError as exc:
                 raise DBusError(CONTROL_DBUS_ERROR, str(exc)) from exc
             except Exception as exc:
-                LOGGER.error("D-Bus control method failed error_type=%s", type(exc).__name__)
+                LOGGER.error("D-Bus framework method failed error_type=%s", type(exc).__name__)
                 raise DBusError(CONTROL_DBUS_ERROR, f"{type(exc).__name__}: {exc}") from exc
 
         @method()
@@ -70,40 +68,32 @@ def _service_interface(control: PivotControl) -> Any:
             return self._call(lambda: _json(control.runtime_snapshot()))
 
         @method()
-        def ListOperations(self) -> "s":
-            return self._call(lambda: _json([item.as_dict() for item in control.operations()]))
+        def Inject(self, envelope_json: "s") -> "s":
+            return self._call(lambda: control.inject(_envelope(envelope_json)))
 
         @method()
-        def Invoke(self, operation: "s", arguments_json: "s") -> "s":
-            return self._call(lambda: control.submit(operation, _arguments(arguments_json)))
+        def GetStimulus(self, stimulus_id: "s") -> "s":
+            return self._call(lambda: _json(control.stimulus(stimulus_id).as_dict()))
 
         @method()
-        def GetTask(self, task_id: "s") -> "s":
-            return self._call(lambda: _json(control.task(task_id).as_dict()))
+        def ListStimuli(self, limit: "u") -> "s":
+            return self._call(lambda: _json([item.as_dict() for item in control.stimuli(limit=limit)]))
 
         @method()
-        def ListTasks(self) -> "s":
-            return self._call(lambda: _json([task.as_dict() for task in control.tasks()]))
+        def ListOutputs(self, limit: "u") -> "s":
+            return self._call(lambda: _json([item.as_dict() for item in control.outputs(limit=limit)]))
 
         @method()
-        def CancelTask(self, task_id: "s") -> "b":
-            return self._call(lambda: control.cancel_task(task_id))
-
-        @method()
-        def GetMainAgent(self) -> "s":
-            return self._call(lambda: _json(control.main_snapshot()))
-
-        @method()
-        def GetHistory(self) -> "s":
-            return self._call(lambda: _json(control.history()))
-
-        @method()
-        def SendMessage(self, message: "s") -> "s":
-            return self._call(lambda: control.submit_message(message))
+        def CancelStimulus(self, stimulus_id: "s") -> "b":
+            return self._call(lambda: control.cancel_stimulus(stimulus_id))
 
         @method()
         def InterruptMain(self) -> "b":
             return self._call(control.interrupt_main)
+
+        @method()
+        def RequestReload(self) -> "s":
+            return self._call(lambda: _json(control.request_reload()))
 
         @method()
         def RequestShutdown(self) -> "b":
@@ -111,17 +101,31 @@ def _service_interface(control: PivotControl) -> Any:
             return True
 
         @signal()
-        def ControlEvent(self, event: str, payload_json: str) -> "ss":
+        def StimulusChanged(self, payload_json: str) -> "s":
+            return payload_json
+
+        @signal()
+        def OutputAvailable(self, payload_json: str) -> "s":
+            return payload_json
+
+        @signal()
+        def RuntimeEvent(self, event: str, payload_json: str) -> "ss":
             return [event, payload_json]
 
         def emit_control_event(self, event: str, payload: Mapping[str, Any]) -> None:
-            self.ControlEvent(event, _json(payload))
+            encoded = _json(payload)
+            if event == "stimulus_changed":
+                self.StimulusChanged(encoded)
+            elif event == "output_available":
+                self.OutputAvailable(encoded)
+            elif event != "activation_progress":
+                self.RuntimeEvent(event, encoded)
 
     return PivotControlInterface()
 
 
 class ControlDBusService:
-    """Host the pivot control interface on a dedicated D-Bus event-loop thread."""
+    """Host the narrow framework interface on a dedicated D-Bus loop thread."""
 
     def __init__(
         self,
@@ -148,7 +152,6 @@ class ControlDBusService:
         self._stop_event: asyncio.Event | None = None
         self._ready = threading.Event()
         self._startup_error: BaseException | None = None
-        self._interface: Any = None
         self._unsubscribe: Any = None
 
     @property
@@ -156,8 +159,6 @@ class ControlDBusService:
         return self._thread is not None and self._thread.is_alive() and self._ready.is_set() and self._startup_error is None
 
     def start(self) -> None:
-        """Start the service and wait until the well-known name is owned."""
-
         if self._thread is not None:
             if self.running:
                 return
@@ -174,8 +175,6 @@ class ControlDBusService:
         LOGGER.info("D-Bus control service started bus=%s service=%s", self.bus, self.service_name)
 
     def stop(self) -> None:
-        """Stop the event loop and disconnect from D-Bus."""
-
         loop = self._loop
         stop_event = self._stop_event
         if loop is not None and stop_event is not None and loop.is_running():
@@ -209,7 +208,6 @@ class ControlDBusService:
         connection = await message_bus.connect()
         try:
             interface = _service_interface(self.control)
-            self._interface = interface
             connection.export(CONTROL_DBUS_PATH, interface)
             reply = await connection.request_name(self.service_name, NameFlag.DO_NOT_QUEUE)
             if reply not in {RequestNameReply.PRIMARY_OWNER, RequestNameReply.ALREADY_OWNER}:
