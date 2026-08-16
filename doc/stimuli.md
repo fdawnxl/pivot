@@ -22,13 +22,13 @@ The framework does not implement wake-word detection, speech recognition, audio 
 
 `target_agent_id` is assigned by pivot and cannot be supplied by an adapter. The only external target is the durable main Agent. `command` payloads require `content`. An observation with `delivery: "state"` requires a non-empty `payload.values` object and accepts an optional positive `ttl` in seconds.
 
-`observation` defaults to `state`: pivot updates world state and completes the stimulus without invoking an LLM. An adapter emits `delivery: "activate"` after its local threshold, hysteresis, or other attention policy decides that the main Agent must act. All other kinds default to `activate`.
+`observation` defaults to `state`: pivot updates world state and completes the stimulus without invoking an LLM. An adapter can emit `delivery: "activate"` after its local attention policy decides that the main Agent must act. Instance event sources can instead use a declarative [Event-to-Stimulus bridge](events.md), which applies a condition and emits an activating observation on a persistent rising edge. All other kinds default to `activate`.
 
 Stimuli are persisted in `memory/pivot.db`. Priority aging prevents a continuous urgent source from starving older work, and FIFO order is preserved when effective priorities match. The pending queue is bounded and old terminal records are removed according to instance configuration. A unique `(source, dedupe_key)` pair makes adapter retries idempotent.
 
 State-only observations default to `replay_safe: true`; activating stimuli default to `false`. After an unclean stop, only explicitly safe processing stimuli return to the queue. Unsafe stimuli become failed with a diagnostic error because a capability or executor side effect may already have happened.
 
-The lifecycle is `queued`, `processing`, then `completed`, `failed`, or `cancelled`. Every activation is bounded by the normal model round limit. A sensor adapter should perform debouncing, hysteresis, cooldown, and threshold evaluation in the instance/event layer before publishing repeated observations.
+The lifecycle is `queued`, `processing`, then `completed`, `failed`, or `cancelled`. Every activation is bounded by the normal model round limit. Device-specific acquisition and signal processing remain in the instance layer; Pivot's event bridge provides generic comparison, persistent edge state, and cooldown semantics.
 
 ## Output envelope
 
