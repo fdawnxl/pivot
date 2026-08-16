@@ -50,6 +50,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.dbus_only and args.message is not None:
         build_parser().error("--dbus-only does not accept a message")
     configure_logging("INFO")
+    while True:
+        exit_code, reload_requested = _run_once(args)
+        if not reload_requested:
+            return exit_code
+        LOGGER.info("Reloading pivot runtime from instance configuration")
+
+
+def _run_once(args: argparse.Namespace) -> tuple[int, bool]:
+    """Run one runtime generation and report whether the host must rebuild it."""
+
     client: PivotClient | None = None
     try:
         client = PivotClient(build_runtime(PivotConfig.load(instance_path=args.instance)))
@@ -70,12 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         elif dbus_required:
             raise ConfigurationError("D-Bus control is disabled by configuration")
         if args.dbus_only:
-            _wait_for_shutdown(client)
-            return 0
+            return 0, _wait_for_shutdown(client)
         if args.message is None and sys.stdin.isatty():
             configure_tui_logging()
-            run_tui(client, agent, show_welcome=not args.no_banner)
-            return 0
+            return 0, run_tui(client, agent, show_welcome=not args.no_banner)
         if not args.no_banner:
             _show_banner(runtime, agent, sys.stderr)
         message = args.message if args.message is not None else sys.stdin.read().strip()
@@ -84,19 +92,20 @@ def main(argv: list[str] | None = None) -> int:
         response = client.run_main(message)
         LOGGER.info("CLI request completed agent_id=%s", agent.agent_id)
         sys.stdout.write(response + "\n")
-        return 0
+        return 0, False
     except Exception as exc:
         LOGGER.error("Pivot failed: %s", exc)
-        return 1
+        return 1, False
     finally:
         if client is not None:
             client.close()
 
 
-def _wait_for_shutdown(client: PivotClient) -> None:
-    """Wait for SIGINT or SIGTERM while the D-Bus control service is active."""
+def _wait_for_shutdown(client: PivotClient) -> bool:
+    """Wait for shutdown and return whether the host should rebuild the runtime."""
 
     stopped = threading.Event()
+    reload_requested = threading.Event()
     previous: dict[int, object] = {}
 
     def request_stop(_signum: int, _frame: object) -> None:
@@ -104,11 +113,14 @@ def _wait_for_shutdown(client: PivotClient) -> None:
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous[signum] = signal.signal(signum, request_stop)
-    unsubscribe = client.control.subscribe(
-        lambda event, _payload: stopped.set()
-        if event in {"shutdown_requested", "reload_requested"}
-        else None
-    )
+    def control_event(event: str, _payload: object) -> None:
+        if event == "reload_requested":
+            reload_requested.set()
+            stopped.set()
+        elif event == "shutdown_requested":
+            stopped.set()
+
+    unsubscribe = client.control.subscribe(control_event)
     LOGGER.info("D-Bus-only control process is ready")
     try:
         stopped.wait()
@@ -116,3 +128,4 @@ def _wait_for_shutdown(client: PivotClient) -> None:
         unsubscribe()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+    return reload_requested.is_set()

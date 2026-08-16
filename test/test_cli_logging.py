@@ -294,6 +294,8 @@ async def test_textual_cli_commands_and_compact_layout(tmp_path: Path) -> None:
         assert "/agents" in notice.content and "/stop" in notice.content
         app.action_toggle_agents()
         assert not app.query_one("#body").has_class("agents-hidden")
+        app._apply_control_event("reload_requested", {"requested": True})
+        assert app.reload_requested
     client.close()
 
 

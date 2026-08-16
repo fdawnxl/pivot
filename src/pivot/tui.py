@@ -572,6 +572,7 @@ class PivotApp(App[None]):
         self._agent_refresh_pending = False
         self._agent_refresh_dirty = False
         self._control_unsubscribe: Any = None
+        self.reload_requested = False
 
     def compose(self) -> ComposeResult:
         config = self.runtime.config
@@ -630,6 +631,10 @@ class PivotApp(App[None]):
 
     def _apply_control_event(self, event: str, payload: dict[str, Any]) -> None:
         if event == "shutdown_requested":
+            self.exit()
+            return
+        if event == "reload_requested":
+            self.reload_requested = True
             self.exit()
             return
         agent_id = payload.get("target_agent_id")
@@ -1117,12 +1122,14 @@ class PivotApp(App[None]):
         self._quit_armed = False
 
 
-def run_tui(client: PivotClient, agent: PersistentAgent, *, show_welcome: bool = True) -> None:
-    """Run the interactive Textual application until the user exits."""
+def run_tui(client: PivotClient, agent: PersistentAgent, *, show_welcome: bool = True) -> bool:
+    """Run the TUI and report whether the host should rebuild the runtime."""
 
     LOGGER.info("Textual interface started agent_id=%s", agent.agent_id)
-    PivotApp(client, agent, show_welcome=show_welcome).run()
+    app = PivotApp(client, agent, show_welcome=show_welcome)
+    app.run()
     LOGGER.info("Textual interface stopped agent_id=%s", agent.agent_id)
+    return app.reload_requested
 
 
 def _visible_messages(messages: Iterable[Message]) -> Iterable[tuple[str, str]]:
