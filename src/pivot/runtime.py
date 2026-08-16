@@ -15,7 +15,7 @@ from .events import EventPool, EventScriptRunner, EventService, EventSupervisor,
 from .executors import ExecutorRegistry, ShellExecutor
 from .llm import LiteLLMClient
 from .lease import RuntimeLease
-from .memory import ContextBuilder, MemoryService, MemoryStore
+from .memory import ContextBuilder, MemoryService, RuntimeStore
 from .stimuli import MainAgentReactor, StimulusInbox
 
 LOGGER = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class Runtime:
     registry: CapabilityRegistry
     events: EventPool
     event_service: EventService
-    memory: MemoryStore
+    memory: RuntimeStore
     main_agent: PersistentAgent
     dependencies: DependencyManager | None = None
     executors: ExecutorRegistry | None = None
@@ -44,7 +44,11 @@ class Runtime:
         if self.agents is None:
             raise RuntimeError("Agent control is required to start the main-agent reactor")
         if self.inbox is None:
-            self.inbox = StimulusInbox(self.memory.path)
+            self.inbox = StimulusInbox(
+                self.memory,
+                max_pending=self.config.stimulus_max_pending,
+                retention_seconds=self.config.stimulus_retention_seconds,
+            )
         if self.reactor is None:
             self.reactor = MainAgentReactor(self.main_agent, self.agents, self.inbox)
             self.reactor.start()
@@ -78,7 +82,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
         dbus_timeout=config.dependency_dbus_timeout,
         stop_timeout=config.dependency_stop_timeout,
     )
-    memory: MemoryStore | None = None
+    memory: RuntimeStore | None = None
     try:
         dependencies.start_all()
         registry = CapabilityRegistry()
@@ -120,7 +124,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
                 max_output_bytes=config.executor_max_output_bytes,
             )
         )
-        memory = MemoryStore(config.instance_path / "memory")
+        memory = RuntimeStore(config.instance_path / "memory")
         memory_service = MemoryService(memory)
         main_agent = PersistentAgent(
             memory.main_agent_id(),

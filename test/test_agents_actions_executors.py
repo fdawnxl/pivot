@@ -14,7 +14,7 @@ from pivot.config import PivotConfig
 from pivot.credentials import ProviderCredential
 from pivot.events import EventDescriptor, EventPool, EventService, EventSupervisor
 from pivot.executors import ExecutorError, ExecutorRegistry, ShellExecutor
-from pivot.memory import MemoryStore
+from pivot.memory import RuntimeStore
 from pivot.models import CapabilityDescriptor, ParsedResponse, ToolCall
 from pivot.runtime import PivotClient, Runtime
 
@@ -79,7 +79,7 @@ def test_fixed_text_action_executes_through_agent_router(tmp_path: Path) -> None
 
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent = PersistentAgent(
         memory.main_agent_id(),
         llm=TextActionLLM(),
@@ -172,7 +172,7 @@ def _agent_runtime(tmp_path: Path) -> Runtime:
     event_service = EventService(events, EventSupervisor(events, None))
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     main = PersistentAgent(
         memory.main_agent_id(),
         llm=llm,
@@ -238,7 +238,7 @@ def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
     service = EventService(events, EventSupervisor(events, None))
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     main = PersistentAgent(
         memory.main_agent_id(),
         llm=BlockingWorkerLLM(),
@@ -294,7 +294,7 @@ def test_worker_completion_reenters_main_agent_as_typed_stimulus(tmp_path: Path)
     service = EventService(events, EventSupervisor(events, None))
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     main = PersistentAgent(
         memory.main_agent_id(),
         llm=llm,

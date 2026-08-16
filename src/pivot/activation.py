@@ -18,7 +18,7 @@ from .events import EVENT_WAIT_TOOL, EventError, EventPool, EventService
 from .executors import ExecutorError, ExecutorRegistry
 from .llm import LLMClient
 from .logging import log_context
-from .memory import ContextBuilder, MemoryError, MemoryService, MemoryStore
+from .memory import ContextBuilder, MemoryError, MemoryService, RuntimeStore
 from .models import Message, ToolCall, normalize_content
 from .parser import parse_response
 
@@ -125,7 +125,7 @@ class PersistentAgent:
         *,
         llm: LLMClient,
         capabilities: CapabilityRegistry,
-        memory: MemoryStore,
+        memory: RuntimeStore,
         events: EventPool | None = None,
         event_service: EventService | None = None,
         event_names: Sequence[str] | None = None,

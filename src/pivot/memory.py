@@ -57,8 +57,10 @@ class MemoryRecord:
         }
 
 
-class MemoryStore:
-    """Own agent identity, activations, messages, tasks, and retrieved memory."""
+class RuntimeStore:
+    """Own the instance database, schema, transactions, and runtime records."""
+
+    SCHEMA_VERSION = 1
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -170,6 +172,39 @@ class MemoryStore:
             valid_until REAL,
             PRIMARY KEY(source, field)
         );
+        CREATE TABLE IF NOT EXISTS stimuli (
+            stimulus_id TEXT PRIMARY KEY,
+            target_agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+            kind TEXT NOT NULL,
+            source TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            correlation_id TEXT,
+            causation_id TEXT,
+            dedupe_key TEXT,
+            state TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            activation_id TEXT REFERENCES activations(activation_id),
+            response TEXT,
+            error TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS stimuli_queue
+            ON stimuli(state, priority DESC, created_at, stimulus_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS stimuli_dedupe
+            ON stimuli(source, dedupe_key) WHERE dedupe_key IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS outputs (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            output_id TEXT NOT NULL UNIQUE,
+            stimulus_id TEXT NOT NULL REFERENCES stimuli(stimulus_id),
+            agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            correlation_id TEXT,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS outputs_by_time ON outputs(created_at, output_id);
         """
         try:
             with self._lock, self._connection:
@@ -182,6 +217,7 @@ class MemoryStore:
                     LOGGER.warning("SQLite FTS5 is unavailable; memory recall will use substring matching")
                 else:
                     self._fts_enabled = True
+                self._connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
         except sqlite3.Error as exc:
             raise MemoryError(f"Cannot initialize memory database: {exc}") from exc
 
@@ -247,8 +283,15 @@ class MemoryStore:
                 (state, time.time(), agent_id),
             )
 
-    def create_activation(self, agent_id: str, source: str, content: Any) -> str:
-        activation_id = str(uuid4())
+    def create_activation(
+        self,
+        agent_id: str,
+        source: str,
+        content: Any,
+        *,
+        activation_id: str | None = None,
+    ) -> str:
+        activation_id = activation_id or str(uuid4())
         now = time.time()
         with self._lock, self._connection:
             self._connection.execute(
@@ -583,7 +626,7 @@ class MemoryStore:
 class ContextBuilder:
     """Build a bounded prompt view from durable memory for one activation."""
 
-    def __init__(self, store: MemoryStore, *, max_messages: int = 48, max_chars: int = 32000) -> None:
+    def __init__(self, store: RuntimeStore, *, max_messages: int = 48, max_chars: int = 32000) -> None:
         if max_messages < 1 or max_chars < 1024:
             raise ValueError("Context limits are invalid")
         self.store = store
@@ -624,7 +667,7 @@ class ContextBuilder:
 class MemoryService:
     """Validate model-facing remember, recall, and forget operations."""
 
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(self, store: RuntimeStore) -> None:
         self.store = store
 
     def prompt_context(self) -> tuple[dict[str, Any], ...]:
@@ -725,5 +768,5 @@ __all__ = [
     "MemoryKind",
     "MemoryRecord",
     "MemoryService",
-    "MemoryStore",
+    "RuntimeStore",
 ]

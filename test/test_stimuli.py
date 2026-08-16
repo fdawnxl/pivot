@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pivot.memory import MemoryStore
+from pivot.memory import RuntimeStore
 from pivot.stimuli import StimulusEnvelope, StimulusError, StimulusInbox, StimulusState
 
 
@@ -22,7 +22,7 @@ def _envelope(agent_id: str, *, source: str, content: str, priority: int = 50, *
 
 
 def test_stimulus_envelope_binds_target_and_rejects_adapter_specific_fields(tmp_path: Path) -> None:
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     envelope = _envelope(agent_id, source="instance.voice-adapter", content="look ahead")
 
@@ -42,9 +42,9 @@ def test_stimulus_envelope_binds_target_and_rejects_adapter_specific_fields(tmp_
 
 
 def test_stimulus_inbox_is_priority_ordered_idempotent_and_persistent(tmp_path: Path) -> None:
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
-    inbox = StimulusInbox(memory.path)
+    inbox = StimulusInbox(memory)
     low = _envelope(agent_id, source="sensor", content="low", priority=10)
     high = _envelope(
         agent_id,
@@ -82,7 +82,7 @@ def test_stimulus_inbox_is_priority_ordered_idempotent_and_persistent(tmp_path: 
     inbox.finish(high.stimulus_id, StimulusState.COMPLETED, response="handled")
     inbox.close()
 
-    reopened = StimulusInbox(memory.path)
+    reopened = StimulusInbox(memory)
     assert reopened.get(high.stimulus_id).response == "handled"
     remaining = reopened.claim_next(timeout=0.01)
     assert remaining is not None and remaining.stimulus_id == low.stimulus_id
@@ -92,15 +92,29 @@ def test_stimulus_inbox_is_priority_ordered_idempotent_and_persistent(tmp_path: 
 
 
 def test_processing_stimulus_is_requeued_after_runtime_restart(tmp_path: Path) -> None:
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
-    inbox = StimulusInbox(memory.path)
+    inbox = StimulusInbox(memory)
     envelope = _envelope(agent_id, source="timer", content="resume")
     inbox.enqueue(envelope)
     assert inbox.claim_next(timeout=0.01).state == StimulusState.PROCESSING  # type: ignore[union-attr]
     inbox.close()
 
-    recovered = StimulusInbox(memory.path)
+    recovered = StimulusInbox(memory)
     assert recovered.get(envelope.stimulus_id).state == StimulusState.QUEUED
     recovered.close()
+    memory.close()
+
+
+def test_stimulus_inbox_enforces_pending_limit(tmp_path: Path) -> None:
+    memory = RuntimeStore(tmp_path / "memory")
+    agent_id = memory.main_agent_id()
+    inbox = StimulusInbox(memory, max_pending=1)
+    inbox.enqueue(_envelope(agent_id, source="sensor-a", content="first"))
+
+    with pytest.raises(StimulusError, match="inbox is full"):
+        inbox.enqueue(_envelope(agent_id, source="sensor-b", content="second"))
+
+    assert inbox.pending_count() == 1
+    inbox.close()
     memory.close()

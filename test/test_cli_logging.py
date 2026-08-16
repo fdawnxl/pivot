@@ -14,7 +14,7 @@ from pivot.credentials import ProviderCredential
 from pivot.dependencies import DependencyState, DependencyStatus
 from pivot.events import EventPool, EventService, EventSupervisor
 from pivot.executors import ExecutorRegistry, ShellExecutor
-from pivot.memory import MemoryStore
+from pivot.memory import RuntimeStore
 from pivot.models import CapabilityDescriptor, EventDescriptor, Message
 from pivot.runtime import PivotClient, Runtime
 from pivot.tui import (
@@ -41,7 +41,7 @@ def _runtime(tmp_path: Path, llm: Any | None = None) -> Runtime:
     event_service = EventService(events, EventSupervisor(events, None))
     executors = ExecutorRegistry()
     executors.register(ShellExecutor(tmp_path, timeout=2))
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     model = llm or EchoLLM()
     main = PersistentAgent(
         memory.main_agent_id(),

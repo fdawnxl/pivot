@@ -145,7 +145,7 @@ class PivotControl:
 
     def runtime_snapshot(self) -> dict[str, Any]:
         config = self.runtime.config
-        queued = sum(item.state == StimulusState.QUEUED for item in self.inbox.list(limit=1000))
+        queued = self.inbox.pending_count()
         return {
             "provider": config.provider.name,
             "model": config.provider.model,

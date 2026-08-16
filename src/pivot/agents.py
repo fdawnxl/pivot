@@ -17,7 +17,7 @@ from .capabilities import CapabilityError, CapabilityRegistry
 from .events import EventPool, EventService
 from .executors import ExecutorRegistry
 from .llm import LLMClient
-from .memory import ContextBuilder, MemoryService, MemoryStore
+from .memory import ContextBuilder, MemoryService, RuntimeStore
 from .activation import (
     ActivationProgress,
     AgentCancelled,
@@ -95,7 +95,7 @@ class AgentControl:
         *,
         llm: LLMClient,
         capabilities: CapabilityRegistry,
-        memory: MemoryStore,
+        memory: RuntimeStore,
         events: EventPool,
         event_service: EventService,
         executors: ExecutorRegistry,

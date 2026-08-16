@@ -17,7 +17,7 @@ from pivot.events import (
     EventService,
     EventSupervisor,
 )
-from pivot.memory import MemoryStore
+from pivot.memory import RuntimeStore
 from pivot.models import CapabilityDescriptor
 
 
@@ -42,7 +42,7 @@ class ToolLLM:
 def test_activation_executes_tools_and_persists_in_sqlite(tmp_path: Path) -> None:
     registry = CapabilityRegistry()
     registry.register(CapabilityDescriptor("echo", "work", "Echo", {"type": "object"}), lambda value: value)
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     agent = PersistentAgent(agent_id, llm=ToolLLM(), capabilities=registry, memory=memory, max_rounds=3)
     updates = []
@@ -69,7 +69,7 @@ def test_activation_preserves_multimodal_content(tmp_path: Path) -> None:
         def complete(self, messages, *, tools=()):
             return {"choices": [{"message": {"content": content}}]}
 
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent = PersistentAgent(
         memory.main_agent_id(),
         llm=MultimodalLLM(),
@@ -92,7 +92,7 @@ def test_activation_state_tracks_running_and_ready(tmp_path: Path) -> None:
             release.wait(timeout=2)
             return {"choices": [{"message": {"content": "done"}}]}
 
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent = PersistentAgent(memory.main_agent_id(), llm=BlockingLLM(), capabilities=CapabilityRegistry(), memory=memory)
     thread = threading.Thread(target=agent.activate, args=("hello",))
     thread.start()
@@ -112,7 +112,7 @@ def test_cancelled_activation_is_excluded_from_later_context(tmp_path: Path) -> 
             token.cancel()
             return {"choices": [{"message": {"content": "late"}}]}
 
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent = PersistentAgent(memory.main_agent_id(), llm=CancellingLLM(), capabilities=CapabilityRegistry(), memory=memory)
     with pytest.raises(AgentCancelled):
         agent.activate("cancel me", cancellation=token)
@@ -215,7 +215,7 @@ def test_worker_event_wait_is_pending_then_resumes(tmp_path: Path) -> None:
             return pool.report_source("/event.py", {"temperature": 42})
 
     service = EventService(pool, BlockingSupervisor(), poll_interval=0.01)  # type: ignore[arg-type]
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     worker_id = memory.create_worker(name="waiter", parent_id=memory.main_agent_id(), capabilities=(), events=("monitor_temperature",))
     agent = PersistentAgent(
         worker_id,

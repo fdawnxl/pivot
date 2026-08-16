@@ -10,12 +10,12 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 from .activation import ActivationProgress, AgentCancelled, CancellationToken, PersistentAgent, ProgressCallback
 from .agents import AgentControl, AgentRecord
+from .memory import RuntimeStore
 from .models import normalize_content
 
 LOGGER = logging.getLogger(__name__)
@@ -178,6 +178,7 @@ class OutputEnvelope:
     payload: dict[str, Any]
     correlation_id: str | None
     created_at: float = field(default_factory=time.time)
+    sequence: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -188,59 +189,34 @@ class OutputEnvelope:
             "payload": self.payload,
             "correlation_id": self.correlation_id,
             "created_at": self.created_at,
+            "sequence": self.sequence,
         }
 
 
 class StimulusInbox:
-    """SQLite-backed priority inbox shared by every instance ingress adapter."""
+    """Durable stimulus repository backed by the runtime-owned database."""
 
-    def __init__(self, database: str | Path) -> None:
-        self.path = Path(database).expanduser().resolve()
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA foreign_keys=ON")
-        self._lock = threading.RLock()
+    def __init__(
+        self,
+        store: RuntimeStore,
+        *,
+        max_pending: int = 1000,
+        retention_seconds: float = 7 * 24 * 3600,
+    ) -> None:
+        if max_pending < 1 or retention_seconds <= 0:
+            raise ValueError("Stimulus inbox limits must be positive")
+        self.store = store
+        self.path = store.path
+        self._connection = store._connection
+        self._lock = store._lock
         self._condition = threading.Condition(self._lock)
+        self.max_pending = max_pending
+        self.retention_seconds = retention_seconds
         self._closed = False
-        self._initialize()
+        self._recover()
 
-    def _initialize(self) -> None:
-        schema = """
-        CREATE TABLE IF NOT EXISTS stimuli (
-            stimulus_id TEXT PRIMARY KEY,
-            target_agent_id TEXT NOT NULL REFERENCES agents(agent_id),
-            kind TEXT NOT NULL,
-            source TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            priority INTEGER NOT NULL,
-            correlation_id TEXT,
-            causation_id TEXT,
-            dedupe_key TEXT,
-            state TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            response TEXT,
-            error TEXT,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS stimuli_queue
-            ON stimuli(state, priority DESC, created_at, stimulus_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS stimuli_dedupe
-            ON stimuli(source, dedupe_key) WHERE dedupe_key IS NOT NULL;
-        CREATE TABLE IF NOT EXISTS outputs (
-            output_id TEXT PRIMARY KEY,
-            stimulus_id TEXT NOT NULL REFERENCES stimuli(stimulus_id),
-            agent_id TEXT NOT NULL REFERENCES agents(agent_id),
-            kind TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            correlation_id TEXT,
-            created_at REAL NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS outputs_by_time ON outputs(created_at, output_id);
-        """
+    def _recover(self) -> None:
         with self._lock, self._connection:
-            self._connection.executescript(schema)
             self._connection.execute(
                 "UPDATE stimuli SET state = 'queued', updated_at = ? WHERE state = 'processing'",
                 (time.time(),),
@@ -253,6 +229,12 @@ class StimulusInbox:
         with self._condition, self._connection:
             if self._closed:
                 raise StimulusError("Stimulus inbox is closed")
+            self._prune(now)
+            pending = self._connection.execute(
+                "SELECT count(*) FROM stimuli WHERE state IN ('queued', 'processing')"
+            ).fetchone()[0]
+            if int(pending) >= self.max_pending:
+                raise StimulusError(f"Stimulus inbox is full ({self.max_pending} pending)")
             try:
                 self._connection.execute(
                     """INSERT INTO stimuli(
@@ -314,6 +296,7 @@ class StimulusInbox:
         *,
         response: str | None = None,
         error: str | None = None,
+        notify: bool = True,
     ) -> StimulusEnvelope:
         if state not in _TERMINAL_STATES:
             raise ValueError("Stimulus can only finish in a terminal state")
@@ -324,7 +307,8 @@ class StimulusInbox:
             )
             if not cursor.rowcount:
                 raise StimulusError(f"Unknown stimulus: {stimulus_id}")
-            self._condition.notify_all()
+            if notify:
+                self._condition.notify_all()
         return self.get(stimulus_id)
 
     def cancel_queued(self, stimulus_id: str) -> bool:
@@ -399,7 +383,24 @@ class StimulusInbox:
                 return
             self._closed = True
             self._condition.notify_all()
-            self._connection.close()
+
+    def pending_count(self) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT count(*) FROM stimuli WHERE state IN ('queued', 'processing')"
+            ).fetchone()
+        return int(row[0])
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.retention_seconds
+        self._connection.execute(
+            "DELETE FROM outputs WHERE stimulus_id IN (SELECT stimulus_id FROM stimuli WHERE state IN ('completed', 'failed', 'cancelled') AND updated_at < ?)",
+            (cutoff,),
+        )
+        self._connection.execute(
+            "DELETE FROM stimuli WHERE state IN ('completed', 'failed', 'cancelled') AND updated_at < ?",
+            (cutoff,),
+        )
 
     def wake(self) -> None:
         with self._condition:
@@ -568,7 +569,12 @@ class MainAgentReactor:
                 cancellation=token,
             )
         except AgentCancelled as exc:
-            finished = self.inbox.finish(envelope.stimulus_id, StimulusState.CANCELLED, error=str(exc))
+            finished = self.inbox.finish(
+                envelope.stimulus_id,
+                StimulusState.CANCELLED,
+                error=str(exc),
+                notify=False,
+            )
         except Exception as exc:
             LOGGER.error(
                 "Stimulus processing failed stimulus_id=%s kind=%s error_type=%s",
@@ -580,6 +586,7 @@ class MainAgentReactor:
                 envelope.stimulus_id,
                 StimulusState.FAILED,
                 error=f"{type(exc).__name__}: {exc}",
+                notify=False,
             )
         else:
             output = OutputEnvelope(
@@ -592,12 +599,18 @@ class MainAgentReactor:
             )
             self.inbox.append_output(output)
             self._emit("output_available", output.as_dict())
-            finished = self.inbox.finish(envelope.stimulus_id, StimulusState.COMPLETED, response=response)
+            finished = self.inbox.finish(
+                envelope.stimulus_id,
+                StimulusState.COMPLETED,
+                response=response,
+                notify=False,
+            )
         finally:
             with self._lock:
                 self._progress.pop(envelope.stimulus_id, None)
                 self._tokens.pop(envelope.stimulus_id, None)
         self._emit("stimulus_changed", finished.as_dict())
+        self.inbox.wake()
 
     def _on_worker_completion(self, record: AgentRecord) -> None:
         snapshot = record.as_dict()
@@ -621,7 +634,7 @@ class MainAgentReactor:
                 LOGGER.warning("Reactor listener failed event=%s error_type=%s", event, type(exc).__name__)
 
 
-def _row_stimulus(row: sqlite3.Row) -> StimulusEnvelope:
+def _row_stimulus(row: Any) -> StimulusEnvelope:
     return StimulusEnvelope(
         str(row["stimulus_id"]),
         str(row["target_agent_id"]),
@@ -640,7 +653,7 @@ def _row_stimulus(row: sqlite3.Row) -> StimulusEnvelope:
     )
 
 
-def _row_output(row: sqlite3.Row) -> OutputEnvelope:
+def _row_output(row: Any) -> OutputEnvelope:
     return OutputEnvelope(
         str(row["output_id"]),
         str(row["stimulus_id"]),
@@ -649,6 +662,7 @@ def _row_output(row: sqlite3.Row) -> OutputEnvelope:
         dict(json.loads(row["payload_json"])),
         str(row["correlation_id"]) if row["correlation_id"] is not None else None,
         float(row["created_at"]),
+        int(row["sequence"]),
     )
 
 

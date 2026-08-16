@@ -8,28 +8,32 @@ from pathlib import Path
 from pivot.actions import ACTION_TOOL
 from pivot.activation import PersistentAgent
 from pivot.capabilities import CapabilityRegistry
-from pivot.memory import ContextBuilder, MemoryService, MemoryStore
+from pivot.memory import ContextBuilder, MemoryService, RuntimeStore
 from pivot.models import Message
 
 
 def test_memory_store_has_stable_main_identity_and_wal_storage(tmp_path: Path) -> None:
     root = tmp_path / "memory"
-    first = MemoryStore(root)
+    first = RuntimeStore(root)
     agent_id = first.main_agent_id()
     assert first.main_agent_id() == agent_id
     first.close()
     first.close()
 
-    second = MemoryStore(root)
+    second = RuntimeStore(root)
     assert second.main_agent_id() == agent_id
     with sqlite3.connect(second.path) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == RuntimeStore.SCHEMA_VERSION
         assert connection.execute("SELECT count(*) FROM agents WHERE role = 'main'").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('stimuli', 'outputs')"
+        ).fetchone()[0] == 2
     second.close()
 
 
 def test_messages_are_appended_and_context_is_bounded(tmp_path: Path) -> None:
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     for index in range(4):
         activation_id = memory.create_activation(agent_id, "user", f"request {index}")
@@ -55,7 +59,7 @@ def test_messages_are_appended_and_context_is_bounded(tmp_path: Path) -> None:
 
 
 def test_context_rebuilds_runtime_and_world_state_without_stale_snapshot(tmp_path: Path) -> None:
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     activation_id = memory.create_activation(agent_id, "user", "temperature")
     memory.append_message(agent_id, activation_id, Message("user", "temperature"))
@@ -87,7 +91,7 @@ def test_context_rebuilds_runtime_and_world_state_without_stale_snapshot(tmp_pat
 
 
 def test_recall_respects_validity_supersession_and_forgetting(tmp_path: Path) -> None:
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     expired = memory.remember(
         namespace="global",
         kind="fact",
@@ -119,7 +123,7 @@ def test_recall_respects_validity_supersession_and_forgetting(tmp_path: Path) ->
 
 
 def test_expired_world_state_is_not_injected(tmp_path: Path) -> None:
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     memory.update_world_state("camera", {"scene": "corridor"}, ttl=-1)
     memory.update_world_state("imu", {"moving": False})
     assert memory.current_world_state() == (
@@ -136,7 +140,7 @@ def test_expired_world_state_is_not_injected(tmp_path: Path) -> None:
 
 def test_tasks_and_event_continuations_are_durable(tmp_path: Path) -> None:
     root = tmp_path / "memory"
-    memory = MemoryStore(root)
+    memory = RuntimeStore(root)
     agent_id = memory.main_agent_id()
     memory.upsert_task("task-1", agent_id, "watch the doorway", "running")
     memory.save_continuation(
@@ -150,7 +154,7 @@ def test_tasks_and_event_continuations_are_durable(tmp_path: Path) -> None:
     )
     memory.close()
 
-    reopened = MemoryStore(root)
+    reopened = RuntimeStore(root)
     with sqlite3.connect(reopened.path) as connection:
         task = connection.execute("SELECT description, state FROM tasks WHERE task_id = 'task-1'").fetchone()
         continuation = connection.execute(
@@ -179,7 +183,7 @@ def test_memory_action_is_routed_through_agent_activation(tmp_path: Path) -> Non
                 }
             return {"choices": [{"message": {"content": "Preference saved."}}]}
 
-    memory = MemoryStore(tmp_path / "memory")
+    memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     agent = PersistentAgent(
         agent_id,
