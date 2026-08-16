@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,49 @@ def test_stimulus_inbox_is_priority_ordered_idempotent_and_persistent(tmp_path: 
     assert remaining is not None and remaining.stimulus_id == low.stimulus_id
     reopened.finish(low.stimulus_id, StimulusState.CANCELLED)
     reopened.close()
+    memory.close()
+
+
+def test_event_occurrence_stimulus_and_edge_state_are_atomic(tmp_path: Path) -> None:
+    memory = RuntimeStore(tmp_path / "memory")
+    agent_id = memory.main_agent_id()
+    inbox = StimulusInbox(memory, retention_seconds=0.001)
+    first = _envelope(agent_id, source="event-bridge:temperature", content="first")
+    occurrence = {
+        "occurrence_id": "occurrence-1",
+        "bridge_id": "temperature-alert",
+        "event_name": "temperature",
+        "source": "/event.py",
+        "field": "temperature",
+        "operator": ">",
+        "expected": 40,
+        "value": 42,
+        "payload": {"values": {"temperature": 42}},
+        "observed_at": 10.0,
+        "rule_signature": '["temperature",">",40]',
+        "fired_at": 10.0,
+    }
+    inbox.enqueue(first, occurrence=occurrence)
+
+    state = memory.event_bridge_state("temperature-alert")
+    assert state is not None and state["matched"] is True and state["fired_at"] == 10.0
+    assert memory.event_occurrences()[0]["stimulus_id"] == first.stimulus_id
+
+    second = _envelope(agent_id, source="event-bridge:temperature", content="second")
+    with pytest.raises(StimulusError, match="occurrence conflicts"):
+        inbox.enqueue(second, occurrence=occurrence)
+    with pytest.raises(StimulusError, match="Unknown stimulus"):
+        inbox.get(second.stimulus_id)
+
+    inbox.finish(first.stimulus_id, StimulusState.COMPLETED)
+    time.sleep(0.01)
+    third = _envelope(agent_id, source="client", content="trigger retention")
+    inbox.enqueue(third)
+    assert memory.event_occurrences() == ()
+    with pytest.raises(StimulusError, match="Unknown stimulus"):
+        inbox.get(first.stimulus_id)
+    inbox.finish(third.stimulus_id, StimulusState.CANCELLED)
+    inbox.close()
     memory.close()
 
 

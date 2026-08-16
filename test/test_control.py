@@ -11,9 +11,10 @@ from pivot.capabilities import CapabilityRegistry
 from pivot.config import PivotConfig
 from pivot.control import PivotControl
 from pivot.credentials import ProviderCredential
-from pivot.events import EventPool, EventService, EventSupervisor
+from pivot.events import EventBridgeRule, EventPool, EventService, EventStimulusBridge, EventSupervisor
 from pivot.executors import ExecutorRegistry, ShellExecutor
 from pivot.memory import RuntimeStore
+from pivot.models import EventDescriptor
 from pivot.runtime import PivotClient, Runtime
 from pivot.stimuli import StimulusState
 
@@ -80,6 +81,41 @@ def test_control_injects_durable_envelopes_and_emits_outputs(tmp_path: Path) -> 
     assert any(event == "output_available" for event, _state in events)
     control.close()
     control.runtime.close()
+
+
+def test_event_bridge_persists_occurrence_and_routes_through_main_inbox(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.events.register(
+        EventDescriptor(
+            "monitor_temperature",
+            "Temperature source",
+            "temperature",
+            (">",),
+            source="/event.py",
+        )
+    )
+    control = PivotControl(runtime)
+    assert runtime.reactor is not None
+    bridge = EventStimulusBridge(
+        (EventBridgeRule("temperature-alert", "monitor_temperature", ">", 40, "state", 80, True),),
+        supervisor=runtime.event_service.supervisor,
+        store=runtime.memory,
+        publish=runtime.reactor.inject_event_occurrence,
+    )
+    try:
+        bridge.observe("/event.py", {"temperature": 42, "unit": "celsius"})
+        stimulus = control.stimuli(limit=1)[0]
+        completed = control.wait_stimulus(stimulus.stimulus_id, timeout=2)
+        occurrences = runtime.memory.event_occurrences()
+
+        assert completed.state == StimulusState.COMPLETED
+        assert completed.source == "event-bridge:temperature-alert"
+        assert completed.causation_id == occurrences[0]["occurrence_id"]
+        assert occurrences[0]["stimulus_id"] == completed.stimulus_id
+        assert runtime.memory.current_world_state()[0]["value"] == 42
+    finally:
+        control.close()
+        runtime.close()
 
 
 def test_control_interrupts_local_main_activation(tmp_path: Path) -> None:

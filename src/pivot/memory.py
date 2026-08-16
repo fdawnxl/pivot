@@ -60,7 +60,7 @@ class MemoryRecord:
 class RuntimeStore:
     """Own the instance database, schema, transactions, and runtime records."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -208,6 +208,30 @@ class RuntimeStore:
             created_at REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS outputs_by_time ON outputs(created_at, output_id);
+        CREATE TABLE IF NOT EXISTS event_bridge_state (
+            bridge_id TEXT PRIMARY KEY,
+            rule_signature TEXT NOT NULL,
+            matched INTEGER NOT NULL DEFAULT 0,
+            value_json TEXT,
+            observed_at REAL,
+            fired_at REAL
+        );
+        CREATE TABLE IF NOT EXISTS event_occurrences (
+            occurrence_id TEXT PRIMARY KEY,
+            bridge_id TEXT NOT NULL,
+            event_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            field TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            expected_json TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            observed_at REAL NOT NULL,
+            stimulus_id TEXT UNIQUE REFERENCES stimuli(stimulus_id),
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS event_occurrences_by_bridge
+            ON event_occurrences(bridge_id, created_at);
         """
         try:
             with self._lock, self._connection:
@@ -635,6 +659,78 @@ class RuntimeStore:
                 "value": json.loads(row["value_json"]),
                 "observed_at": row["observed_at"],
                 "valid_until": row["valid_until"],
+            }
+            for row in rows
+        )
+
+    def event_bridge_state(self, bridge_id: str) -> dict[str, Any] | None:
+        """Return the last persisted condition state for one bridge rule."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM event_bridge_state WHERE bridge_id = ?", (bridge_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "bridge_id": str(row["bridge_id"]),
+            "rule_signature": str(row["rule_signature"]),
+            "matched": bool(row["matched"]),
+            "value": json.loads(row["value_json"]) if row["value_json"] is not None else None,
+            "observed_at": float(row["observed_at"]) if row["observed_at"] is not None else None,
+            "fired_at": float(row["fired_at"]) if row["fired_at"] is not None else None,
+        }
+
+    def save_event_bridge_state(
+        self,
+        bridge_id: str,
+        *,
+        rule_signature: str,
+        matched: bool,
+        value: Any,
+        observed_at: float,
+        fired_at: float | None = None,
+    ) -> None:
+        """Persist the latest bridge condition state."""
+
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO event_bridge_state(
+                    bridge_id, rule_signature, matched, value_json, observed_at, fired_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bridge_id) DO UPDATE SET rule_signature=excluded.rule_signature,
+                    matched=excluded.matched,
+                    value_json=excluded.value_json, observed_at=excluded.observed_at,
+                    fired_at=CASE
+                        WHEN event_bridge_state.rule_signature != excluded.rule_signature THEN excluded.fired_at
+                        ELSE COALESCE(excluded.fired_at, event_bridge_state.fired_at)
+                    END""",
+                (bridge_id, rule_signature, int(matched), _json(value), observed_at, fired_at),
+            )
+
+    def event_occurrences(self, *, limit: int = 100) -> tuple[dict[str, Any], ...]:
+        """Return recent bridge occurrences for diagnostics and recovery tooling."""
+
+        limit = min(max(limit, 1), 1000)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM event_occurrences ORDER BY created_at DESC, occurrence_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(
+            {
+                "occurrence_id": str(row["occurrence_id"]),
+                "bridge_id": str(row["bridge_id"]),
+                "event": str(row["event_name"]),
+                "source": str(row["source"]),
+                "field": str(row["field"]),
+                "operator": str(row["operator"]),
+                "expected": json.loads(row["expected_json"]),
+                "value": json.loads(row["value_json"]),
+                "payload": json.loads(row["payload_json"]),
+                "observed_at": float(row["observed_at"]),
+                "stimulus_id": str(row["stimulus_id"]),
+                "created_at": float(row["created_at"]),
             }
             for row in rows
         )

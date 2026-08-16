@@ -11,11 +11,14 @@ from pivot.capabilities import CapabilityRegistry
 from pivot.events import (
     EVENT_WAIT_TOOL,
     EventDescriptor,
+    EventBridgeRule,
     EventError,
     EventPool,
     EventScriptRunner,
     EventService,
+    EventStimulusBridge,
     EventSupervisor,
+    load_event_bridge_rules,
 )
 from pivot.memory import RuntimeStore
 from pivot.models import CapabilityDescriptor
@@ -150,6 +153,96 @@ def test_event_pool_supports_dynamic_conditions_fifo_timeout_and_error() -> None
     failed = pool.create_wait("monitor_temperature", "agent", ">", 40, 5)
     pool.fail_source("/event.py", "sensor offline")
     assert pool.take_completion(failed.wait_id).status == "error"  # type: ignore[union-attr]
+
+
+def test_event_supervisor_shares_source_reports_with_waits_and_subscribers() -> None:
+    pool = EventPool()
+    pool.register(_temperature_event())
+    wait = pool.create_wait("monitor_temperature", "agent", ">", 40, 5)
+
+    class Runner:
+        def poll(self, source: str) -> dict[str, object]:
+            assert source == "/event.py"
+            return {"temperature": 42, "unit": "celsius"}
+
+    supervisor = EventSupervisor(pool, Runner())  # type: ignore[arg-type]
+    observed: list[dict[str, object]] = []
+    unsubscribe = supervisor.subscribe("/event.py", lambda _source, payload: observed.append(dict(payload)))
+    try:
+        notifications = supervisor.poll_once()
+    finally:
+        unsubscribe()
+
+    assert notifications[0].wait_id == wait.wait_id
+    assert observed == [{"temperature": 42, "unit": "celsius"}]
+
+
+def test_event_bridge_rules_load_independently_and_validate_event_contract(tmp_path: Path) -> None:
+    pool = EventPool()
+    pool.register(_temperature_event())
+    rules_path = tmp_path / "bridges.toml"
+    rules_path.write_text(
+        """
+[[bridge]]
+id = "temperature-alert"
+event = "monitor_temperature"
+operator = ">"
+expected = 40
+delivery = "activate"
+priority = 80
+cooldown = 30
+
+[[bridge]]
+id = "invalid-event"
+event = "missing"
+operator = ">"
+expected = 1
+""",
+        encoding="utf-8",
+    )
+
+    rules = load_event_bridge_rules(rules_path, pool)
+
+    assert len(rules) == 1
+    assert rules[0] == EventBridgeRule(
+        "temperature-alert",
+        "monitor_temperature",
+        ">",
+        40,
+        "activate",
+        80,
+        False,
+        30.0,
+    )
+
+
+def test_event_bridge_uses_durable_rising_edge_state(tmp_path: Path) -> None:
+    pool = EventPool()
+    pool.register(_temperature_event())
+    supervisor = EventSupervisor(pool, None)  # type: ignore[arg-type]
+    memory = RuntimeStore(tmp_path / "memory")
+    emitted: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    def publish(envelope, occurrence):
+        emitted.append((dict(envelope), dict(occurrence)))
+        return f"stimulus-{len(emitted)}"
+
+    rule = EventBridgeRule("temperature-alert", "monitor_temperature", ">", 40)
+    bridge = EventStimulusBridge((rule,), supervisor=supervisor, store=memory, publish=publish)
+    bridge.observe("/event.py", {"temperature": 42})
+    bridge.observe("/event.py", {"temperature": 43})
+    assert len(emitted) == 1
+    assert emitted[0][0]["causation_id"] == emitted[0][1]["occurrence_id"]
+
+    restored = EventStimulusBridge((rule,), supervisor=supervisor, store=memory, publish=publish)
+    restored.observe("/event.py", {"temperature": 44})
+    assert len(emitted) == 1
+
+    restored.observe("/event.py", {"temperature": 20})
+    restored.observe("/event.py", {"temperature": 45})
+    assert len(emitted) == 2
+    assert memory.event_bridge_state(rule.bridge_id)["matched"] is True  # type: ignore[index]
+    memory.close()
 
 
 def test_isolated_event_runner_discovers_and_polls_source(tmp_path: Path) -> None:

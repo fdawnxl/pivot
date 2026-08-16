@@ -11,7 +11,15 @@ from .capabilities import CapabilityRegistry
 from .capabilities.discovery import register_instance_capabilities
 from .config import PivotConfig
 from .dependencies import DependencyManager
-from .events import EventPool, EventScriptRunner, EventService, EventSupervisor, load_event_scripts_isolated
+from .events import (
+    EventPool,
+    EventScriptRunner,
+    EventService,
+    EventStimulusBridge,
+    EventSupervisor,
+    load_event_bridge_rules,
+    load_event_scripts_isolated,
+)
 from .executors import ExecutorRegistry, ShellExecutor
 from .llm import LiteLLMClient
 from .lease import RuntimeLease
@@ -37,6 +45,7 @@ class Runtime:
     lease: RuntimeLease | None = None
     inbox: StimulusInbox | None = None
     reactor: MainAgentReactor | None = None
+    event_bridge: EventStimulusBridge | None = None
 
     def start(self) -> None:
         """Start the persistent main-agent reactor once runtime services exist."""
@@ -53,10 +62,22 @@ class Runtime:
         if self.reactor is None:
             self.reactor = MainAgentReactor(self._main_agent, self.agents, self.inbox)
             self.reactor.start()
+        if self.event_bridge is None:
+            rules = load_event_bridge_rules(self.config.instance_path / "events" / "bridges.toml", self.events)
+            self.event_bridge = EventStimulusBridge(
+                rules,
+                supervisor=self.event_service.supervisor,
+                store=self.memory,
+                publish=self.reactor.inject_event_occurrence,
+                poll_interval=self.config.event_poll_interval,
+            )
+            self.event_bridge.start()
 
     def close(self) -> None:
         """Release runtime-owned external processes."""
 
+        if self.event_bridge is not None:
+            self.event_bridge.close()
         if self.reactor is not None:
             self.reactor.close()
         if self.agents is not None:

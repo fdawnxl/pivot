@@ -155,6 +155,7 @@ class PivotControl:
             "queued_stimuli": queued,
             "capabilities": len(self.runtime.registry.descriptors()),
             "events": len(self.runtime.events.descriptors()),
+            "event_bridges": len(self.runtime.event_bridge.rules) if self.runtime.event_bridge else 0,
             "dependencies": len(self.runtime.dependencies.descriptors()) if self.runtime.dependencies else 0,
         }
 

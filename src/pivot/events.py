@@ -9,14 +9,18 @@ import os
 import subprocess
 import threading
 import time
+import tomllib
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from .models import EventDescriptor
+
+if TYPE_CHECKING:
+    from .memory import RuntimeStore
 
 LOGGER = logging.getLogger(__name__)
 EVENT_WAIT_TOOL = "pivot_wait_event"
@@ -332,18 +336,47 @@ def load_event_scripts_isolated(root: str | Path, runner: EventScriptRunner) -> 
 
 
 class EventSupervisor:
-    """Poll only event scripts that currently have pending waits."""
+    """Poll event scripts shared by waits and autonomous bridge subscribers."""
 
     def __init__(self, pool: EventPool, runner: EventScriptRunner) -> None:
         self.pool = pool
         self.runner = runner
         self._poll_lock = threading.Lock()
+        self._listeners: dict[str, set[Callable[[str, Mapping[str, Any]], None]]] = {}
+        self._listener_lock = threading.RLock()
+
+    def subscribe(
+        self,
+        source: str,
+        listener: Callable[[str, Mapping[str, Any]], None],
+    ) -> Callable[[], None]:
+        """Subscribe to successful source observations without creating an Agent wait."""
+
+        if not source:
+            raise ValueError("Event source must not be empty")
+        with self._listener_lock:
+            self._listeners.setdefault(source, set()).add(listener)
+
+        def unsubscribe() -> None:
+            with self._listener_lock:
+                listeners = self._listeners.get(source)
+                if listeners is not None:
+                    listeners.discard(listener)
+                    if not listeners:
+                        self._listeners.pop(source, None)
+
+        return unsubscribe
+
+    def _sources(self) -> tuple[str, ...]:
+        with self._listener_lock:
+            subscribed = tuple(self._listeners)
+        return tuple(sorted(set(self.pool.pending_sources()).union(subscribed)))
 
     def poll_once(self) -> tuple[EventNotification, ...]:
         notifications: list[EventNotification] = []
         with self._poll_lock:
             notifications.extend(self.pool.expire())
-            for source in self.pool.pending_sources():
+            for source in self._sources():
                 try:
                     payload = self.runner.poll(source)
                 except EventError as exc:
@@ -351,7 +384,315 @@ class EventSupervisor:
                     notifications.extend(self.pool.fail_source(source, str(exc)))
                 else:
                     notifications.extend(self.pool.report_source(source, payload))
+                    with self._listener_lock:
+                        listeners = tuple(self._listeners.get(source, ()))
+                    for listener in listeners:
+                        try:
+                            listener(source, payload)
+                        except Exception as exc:
+                            LOGGER.warning(
+                                "Event source subscriber failed source=%s error_type=%s",
+                                source,
+                                type(exc).__name__,
+                            )
         return tuple(notifications)
+
+
+@dataclass(frozen=True, slots=True)
+class EventBridgeRule:
+    """Declarative rule converting a matching event condition into a stimulus."""
+
+    bridge_id: str
+    event_name: str
+    operator: str
+    expected: Any
+    delivery: Literal["activate", "state"] = "activate"
+    priority: int = 20
+    replay_safe: bool = False
+    cooldown: float = 0.0
+
+    @property
+    def signature(self) -> str:
+        """Return the stable condition identity used to scope persisted edge state."""
+
+        return json.dumps(
+            [self.event_name, self.operator, self.expected],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any], events: EventPool) -> "EventBridgeRule":
+        allowed = {
+            "id",
+            "event",
+            "operator",
+            "expected",
+            "delivery",
+            "priority",
+            "replay_safe",
+            "cooldown",
+        }
+        unknown = set(value) - allowed
+        if unknown:
+            raise EventError(f"Unknown event bridge fields: {', '.join(sorted(unknown))}")
+        bridge_id = value.get("id")
+        if not isinstance(bridge_id, str) or not bridge_id.strip() or len(bridge_id) > 256:
+            raise EventError("Event bridge id must be a non-empty string of at most 256 characters")
+        event_name = value.get("event")
+        if not isinstance(event_name, str) or not event_name.strip():
+            raise EventError("Event bridge event must be a non-empty string")
+        descriptor = next((item for item in events.descriptors() if item.name == event_name), None)
+        if descriptor is None:
+            raise EventError(f"Event bridge references unknown event: {event_name}")
+        if descriptor.source is None:
+            raise EventError(f"Event bridge references event without a pollable source: {event_name}")
+        operator_name = value.get("operator")
+        if operator_name not in descriptor.operators:
+            raise EventError(f"Event bridge operator is not supported by event {event_name}")
+        if "expected" not in value:
+            raise EventError("Event bridge expected value is required")
+        try:
+            json.dumps(value.get("expected"), ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise EventError("Event bridge expected value must be JSON serializable") from exc
+        try:
+            delivery = str(value.get("delivery", "activate"))
+            if delivery not in {"activate", "state"}:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise EventError("Event bridge delivery must be 'activate' or 'state'") from exc
+        priority = value.get("priority", 20)
+        if not isinstance(priority, int) or isinstance(priority, bool) or not -100 <= priority <= 100:
+            raise EventError("Event bridge priority must be an integer between -100 and 100")
+        replay_safe = value.get("replay_safe", delivery == "state")
+        if not isinstance(replay_safe, bool):
+            raise EventError("Event bridge replay_safe must be a boolean")
+        cooldown = value.get("cooldown", 0.0)
+        if not isinstance(cooldown, (int, float)) or isinstance(cooldown, bool) or cooldown < 0:
+            raise EventError("Event bridge cooldown must be zero or positive")
+        return cls(
+            bridge_id.strip(),
+            event_name.strip(),
+            str(operator_name),
+            value.get("expected"),
+            cast(Literal["activate", "state"], delivery),
+            priority,
+            replay_safe,
+            float(cooldown),
+        )
+
+
+def load_event_bridge_rules(path: str | Path, events: EventPool) -> tuple[EventBridgeRule, ...]:
+    """Load optional instance bridge rules, skipping invalid rules independently."""
+
+    bridge_path = Path(path).expanduser().resolve()
+    if not bridge_path.is_file():
+        return ()
+    try:
+        with bridge_path.open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        LOGGER.warning("Unable to load event bridge rules path=%s error=%s", bridge_path, exc)
+        return ()
+    raw_rules = document.get("bridge", document.get("bridges", []))
+    if not isinstance(raw_rules, list):
+        LOGGER.warning("Event bridge rules must be an array path=%s", bridge_path)
+        return ()
+    result: list[EventBridgeRule] = []
+    seen: set[str] = set()
+    for raw in raw_rules:
+        if not isinstance(raw, Mapping):
+            LOGGER.warning("Skipping non-object event bridge rule path=%s", bridge_path)
+            continue
+        try:
+            rule = EventBridgeRule.from_mapping(raw, events)
+            if rule.bridge_id in seen:
+                raise EventError(f"Duplicate event bridge id: {rule.bridge_id}")
+            seen.add(rule.bridge_id)
+            result.append(rule)
+        except EventError as exc:
+            LOGGER.warning("Skipping invalid event bridge rule path=%s error=%s", bridge_path, exc)
+    LOGGER.info("Event bridge discovery completed loaded=%d path=%s", len(result), bridge_path)
+    return tuple(result)
+
+
+class EventStimulusBridge:
+    """Continuously translate rising event conditions into durable main-agent stimuli."""
+
+    def __init__(
+        self,
+        rules: Sequence[EventBridgeRule],
+        *,
+        supervisor: EventSupervisor,
+        store: RuntimeStore,
+        publish: Callable[[Mapping[str, Any], Mapping[str, Any]], str],
+        poll_interval: float = 1.0,
+    ) -> None:
+        if poll_interval <= 0:
+            raise ValueError("Event bridge poll interval must be positive")
+        self.rules = tuple(rules)
+        self.supervisor = supervisor
+        self.store = store
+        self.publish = publish
+        self.poll_interval = poll_interval
+        self._rules_by_source: dict[str, tuple[EventBridgeRule, ...]] = {}
+        self._descriptors = {item.name: item for item in supervisor.pool.descriptors()}
+        bridge_ids = [rule.bridge_id for rule in self.rules]
+        if len(set(bridge_ids)) != len(bridge_ids):
+            raise EventError("Event bridge ids must be unique")
+        for rule in self.rules:
+            descriptor = self._descriptors.get(rule.event_name)
+            if descriptor is None or descriptor.source is None:
+                raise EventError(f"Event bridge {rule.bridge_id} has no pollable event source")
+            if rule.operator not in descriptor.operators:
+                raise EventError(f"Event bridge {rule.bridge_id} uses an unsupported operator")
+            source = descriptor.source
+            self._rules_by_source[source] = (*self._rules_by_source.get(source, ()), rule)
+        self._unsubscribers: list[Callable[[], None]] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.RLock()
+
+    def start(self) -> None:
+        if self._thread is not None or not self._rules_by_source:
+            return
+        for source in self._rules_by_source:
+            self._unsubscribers.append(self.supervisor.subscribe(source, self.observe))
+        self._thread = threading.Thread(target=self._run, name="pivot-event-bridge", daemon=True)
+        self._thread.start()
+        LOGGER.info("Event-to-stimulus bridge started rules=%d", len(self.rules))
+
+    def close(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        self._thread = None
+        for unsubscribe in self._unsubscribers:
+            unsubscribe()
+        self._unsubscribers.clear()
+        if self.rules:
+            LOGGER.info("Event-to-stimulus bridge stopped rules=%d", len(self.rules))
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.supervisor.poll_once()
+            self._stop.wait(self.poll_interval)
+
+    def observe(self, source: str, payload: Mapping[str, Any]) -> None:
+        """Evaluate one successful source observation against configured bridge rules."""
+
+        now = time.time()
+        with self._lock:
+            rules = self._rules_by_source.get(source, ())
+            for rule in rules:
+                descriptor = self._descriptors[rule.event_name]
+                if descriptor.field not in payload:
+                    continue
+                value = payload[descriptor.field]
+                try:
+                    matched = OPERATORS[rule.operator](value, rule.expected)
+                except (TypeError, ValueError):
+                    LOGGER.warning("Event bridge condition evaluation failed bridge_id=%s", rule.bridge_id)
+                    continue
+                previous = self.store.event_bridge_state(rule.bridge_id)
+                if previous is not None and previous["rule_signature"] != rule.signature:
+                    previous = None
+                if not matched:
+                    self.store.save_event_bridge_state(
+                        rule.bridge_id,
+                        rule_signature=rule.signature,
+                        matched=False,
+                        value=value,
+                        observed_at=now,
+                    )
+                    continue
+                if previous is not None and previous["matched"]:
+                    self.store.save_event_bridge_state(
+                        rule.bridge_id,
+                        rule_signature=rule.signature,
+                        matched=True,
+                        value=value,
+                        observed_at=now,
+                    )
+                    continue
+                if (
+                    previous is not None
+                    and previous["fired_at"] is not None
+                    and rule.cooldown > 0
+                    and now - float(previous["fired_at"]) < rule.cooldown
+                ):
+                    self.store.save_event_bridge_state(
+                        rule.bridge_id,
+                        rule_signature=rule.signature,
+                        matched=True,
+                        value=value,
+                        observed_at=now,
+                    )
+                    continue
+                occurrence_id = str(uuid4())
+                stimulus_payload = {
+                    "values": {descriptor.field: value},
+                    "event": rule.event_name,
+                    "bridge_id": rule.bridge_id,
+                    "occurrence_id": occurrence_id,
+                    "condition": {
+                        "field": descriptor.field,
+                        "operator": rule.operator,
+                        "expected": rule.expected,
+                    },
+                    "observation": dict(payload),
+                    "observed_at": now,
+                }
+                envelope = {
+                    "kind": "observation",
+                    "source": f"event-bridge:{rule.bridge_id}",
+                    "payload": stimulus_payload,
+                    "priority": rule.priority,
+                    "delivery": rule.delivery,
+                    "replay_safe": rule.replay_safe,
+                    "causation_id": occurrence_id,
+                    "dedupe_key": occurrence_id,
+                }
+                occurrence = {
+                    "occurrence_id": occurrence_id,
+                    "bridge_id": rule.bridge_id,
+                    "event_name": rule.event_name,
+                    "source": source,
+                    "field": descriptor.field,
+                    "operator": rule.operator,
+                    "expected": rule.expected,
+                    "value": value,
+                    "payload": stimulus_payload,
+                    "observed_at": now,
+                    "rule_signature": rule.signature,
+                    "fired_at": now,
+                }
+                try:
+                    stimulus_id = self.publish(envelope, occurrence)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Event bridge publish failed bridge_id=%s error_type=%s",
+                        rule.bridge_id,
+                        type(exc).__name__,
+                    )
+                    continue
+                self.store.save_event_bridge_state(
+                    rule.bridge_id,
+                    rule_signature=rule.signature,
+                    matched=True,
+                    value=value,
+                    observed_at=now,
+                    fired_at=now,
+                )
+                LOGGER.info(
+                    "Event bridge emitted stimulus bridge_id=%s stimulus_id=%s occurrence_id=%s",
+                    rule.bridge_id,
+                    stimulus_id,
+                    occurrence_id,
+                )
 
 
 class EventService:
@@ -448,7 +789,10 @@ __all__ = [
     "EventPool",
     "EventScriptRunner",
     "EventService",
+    "EventBridgeRule",
+    "EventStimulusBridge",
     "EventSupervisor",
     "EventWait",
     "load_event_scripts_isolated",
+    "load_event_bridge_rules",
 ]

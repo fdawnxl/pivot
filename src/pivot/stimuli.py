@@ -268,10 +268,43 @@ class StimulusInbox:
                 ("Runtime stopped during an unsafe stimulus; automatic replay was refused", time.time()),
             )
 
-    def enqueue(self, envelope: StimulusEnvelope) -> tuple[StimulusEnvelope, bool]:
+    def enqueue(
+        self,
+        envelope: StimulusEnvelope,
+        *,
+        occurrence: Mapping[str, Any] | None = None,
+    ) -> tuple[StimulusEnvelope, bool]:
         """Append one envelope and report whether a new row was created."""
 
         now = time.time()
+        occurrence_values: tuple[Any, ...] | None = None
+        occurrence_state_values: tuple[Any, ...] | None = None
+        if occurrence is not None:
+            try:
+                occurrence_values = (
+                    str(occurrence["occurrence_id"]),
+                    str(occurrence["bridge_id"]),
+                    str(occurrence["event_name"]),
+                    str(occurrence["source"]),
+                    str(occurrence["field"]),
+                    str(occurrence["operator"]),
+                    _json(occurrence["expected"]),
+                    _json(occurrence["value"]),
+                    _json(dict(occurrence["payload"])),
+                    float(occurrence["observed_at"]),
+                    envelope.stimulus_id,
+                    now,
+                )
+                occurrence_state_values = (
+                    str(occurrence["bridge_id"]),
+                    str(occurrence["rule_signature"]),
+                    1,
+                    _json(occurrence["value"]),
+                    float(occurrence["observed_at"]),
+                    float(occurrence["fired_at"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StimulusError(f"Event occurrence is invalid: {exc}") from exc
         with self._condition, self._connection:
             if self._closed:
                 raise StimulusError("Stimulus inbox is closed")
@@ -308,6 +341,26 @@ class StimulusInbox:
                 if existing is None:
                     raise StimulusError("Stimulus id conflicts with an existing envelope") from exc
                 return existing, False
+            if occurrence_values is not None:
+                try:
+                    self._connection.execute(
+                        """INSERT INTO event_occurrences(
+                            occurrence_id, bridge_id, event_name, source, field, operator,
+                            expected_json, value_json, payload_json, observed_at, stimulus_id, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        occurrence_values,
+                    )
+                    self._connection.execute(
+                        """INSERT INTO event_bridge_state(
+                            bridge_id, rule_signature, matched, value_json, observed_at, fired_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(bridge_id) DO UPDATE SET rule_signature=excluded.rule_signature,
+                            matched=excluded.matched, value_json=excluded.value_json,
+                            observed_at=excluded.observed_at, fired_at=excluded.fired_at""",
+                        occurrence_state_values,
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise StimulusError("Event occurrence conflicts with an existing record") from exc
             self._condition.notify_all()
         return envelope, True
 
@@ -459,6 +512,10 @@ class StimulusInbox:
     def _prune(self, now: float) -> None:
         cutoff = now - self.retention_seconds
         self._connection.execute(
+            "DELETE FROM event_occurrences WHERE stimulus_id IN (SELECT stimulus_id FROM stimuli WHERE state IN ('completed', 'failed', 'cancelled') AND updated_at < ?)",
+            (cutoff,),
+        )
+        self._connection.execute(
             "DELETE FROM outputs WHERE stimulus_id IN (SELECT stimulus_id FROM stimuli WHERE state IN ('completed', 'failed', 'cancelled') AND updated_at < ?)",
             (cutoff,),
         )
@@ -558,6 +615,20 @@ class MainAgentReactor:
                 self._tokens.pop(envelope.stimulus_id, None)
         else:
             self._emit("stimulus_changed", accepted.as_dict())
+        return accepted.stimulus_id
+
+    def inject_event_occurrence(
+        self,
+        value: Mapping[str, Any],
+        occurrence: Mapping[str, Any],
+    ) -> str:
+        """Persist a bridge-generated stimulus and its event occurrence audit link."""
+
+        envelope = StimulusEnvelope.from_mapping(value, target_agent_id=self.main_agent.agent_id)
+        accepted, created = self.inbox.enqueue(envelope, occurrence=occurrence)
+        if not created:
+            return accepted.stimulus_id
+        self._emit("stimulus_changed", accepted.as_dict())
         return accepted.stimulus_id
 
     def wait(self, stimulus_id: str, *, timeout: float | None = None) -> StimulusEnvelope:
