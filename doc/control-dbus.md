@@ -1,6 +1,6 @@
 # pivot D-Bus control protocol
 
-Pivot exports its application control surface on D-Bus while keeping local Python methods as the primary in-process path used by the CLI and TUI. Both transports use the same `PivotControl` object, so local and remote messages share the main-Agent FIFO mailbox.
+Pivot exports a narrow framework control surface. Agent, capability, event, executor, and memory operations are model-facing actions and are not exposed as remote control methods. External clients inject a transport-neutral stimulus envelope; the main Agent decides what work is appropriate.
 
 The default endpoint is:
 
@@ -11,78 +11,34 @@ Path:      /org/pivot/Control
 Interface: org.pivot.Control1
 ```
 
-Here `session` names the D-Bus transport scope; it is unrelated to pivot Agent state.
+`session` names the D-Bus transport scope. It is unrelated to Agent state. Use `pivot --dbus-only` to run a headless persistent reactor. If D-Bus is unavailable, local clients and the TUI continue through the same `PivotControl` methods.
 
-Use `pivot --dbus-only` to run a headless control process. Ordinary one-shot and interactive CLI processes also attempt to export the interface. If the bus is unavailable, ordinary CLI/TUI operation continues through local methods. `--no-dbus` explicitly disables export.
-
-## Method model
-
-Short reads return immediately. Long-running work returns a task UUID and executes in a bounded worker pool, so model calls, capabilities, event waits, and dependency startup never block the D-Bus event loop.
-
-Convenience methods:
+## Methods
 
 ```text
-Ping()                                      -> s
-GetRuntime()                                -> s JSON
-ListOperations()                            -> s JSON
-GetTask(task_id: s)                         -> s JSON
-ListTasks()                                 -> s JSON
-CancelTask(task_id: s)                      -> b
-GetMainAgent()                              -> s JSON
-GetHistory()                                -> s JSON
-SendMessage(message: s)                     -> s task_id
-InterruptMain()                             -> b
-RequestShutdown()                           -> b
+Ping()                                  -> s
+GetRuntime()                            -> s JSON
+Inject(envelope_json: s)                -> s stimulus_id
+GetStimulus(stimulus_id: s)             -> s JSON
+ListStimuli(limit: u)                   -> s JSON
+ListOutputs(limit: u)                   -> s JSON
+CancelStimulus(stimulus_id: s)         -> b
+InterruptMain()                         -> b
+RequestReload()                         -> s JSON
+RequestShutdown()                       -> b
 ```
 
-`SendMessage` reserves its FIFO position before control-pool execution. A task remains `queued` until all earlier main-Agent inputs finish. `InterruptMain` cooperatively interrupts the active activation, queued main-Agent tasks, and active workers.
+`Inject` accepts the JSON shape documented in [the stimulus protocol](stimuli.md). Pivot binds the envelope to its one durable main Agent, validates it, and persists it before returning. `RequestReload` validates the current instance configuration and emits a reload request for the host process; applying provider, dependency, or environment changes requires an orderly runtime restart. `RequestShutdown` only requests shutdown and does not terminate a caller-owned process directly.
 
-## Extensible operations
-
-The transport ABI does not need a new D-Bus method for each future pivot feature:
+## Signals
 
 ```text
-Invoke(operation: s, arguments_json: s) -> s task_id
+StimulusChanged(payload_json: s)
+OutputAvailable(payload_json: s)
+RuntimeEvent(event: s, payload_json: s)
 ```
 
-The initial registry includes:
-
-```text
-runtime.get
-runtime.shutdown
-agent.main
-agent.history
-agent.message
-agent.interrupt
-agent.list
-agent.get
-agent.create
-agent.assign
-agent.delegate
-capability.list
-capability.execute
-event.list
-event.wait
-executor.list
-executor.execute
-memory.remember
-memory.recall
-memory.forget
-dependency.list
-dependency.refresh
-dependency.start
-dependency.stop
-```
-
-Arguments and results are JSON values. Task states are `queued`, `running`, `completed`, `failed`, and `cancelled`. A failed task contains a sanitized `error`; a completed task contains `result`.
-
-The interface emits:
-
-```text
-ControlEvent(event: s, payload_json: s)
-```
-
-Current events are `task_changed` and `shutdown_requested`.
+`StimulusChanged` carries queue, processing, and terminal state snapshots. `OutputAvailable` carries a durable `OutputEnvelope`. Runtime events currently include `reload_requested` and `shutdown_requested`. Activation trace details remain local presentation data; the D-Bus ABI does not expose hidden model reasoning.
 
 ## Configuration
 
@@ -97,4 +53,4 @@ dbus_control_start_timeout = 5
 
 The corresponding environment variables are `PIVOT_DBUS_CONTROL_ENABLED`, `PIVOT_DBUS_CONTROL_BUS`, `PIVOT_DBUS_CONTROL_SERVICE`, and `PIVOT_DBUS_CONTROL_START_TIMEOUT`.
 
-The D-Bus session bus trusts the operating-system user boundary. Deployments exporting pivot on a system bus must add an appropriate D-Bus policy before enabling that configuration.
+The D-Bus session bus trusts the operating-system user boundary. Deployments exporting pivot on a system bus must add an appropriate D-Bus policy.

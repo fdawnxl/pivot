@@ -16,11 +16,13 @@ The interactive CLI is a Textual application centered on one persistent main age
 
 An instance is owned by exactly one runtime process at a time. Pivot acquires an exclusive `runtime.lock` before starting dependencies and releases it at shutdown, preventing multiple local processes from controlling the same device state concurrently.
 
-While a CLI process is running, pivot also attempts to export the same application control surface on the session D-Bus as `org.pivot.Control` at `/org/pivot/Control`. Remote clients can send work to the main agent, inspect agent/capability/event/executor/dependency state, manage delegated workers, interrupt work, invoke extensible operations, and request shutdown. The CLI and TUI continue to call local Python methods directly if D-Bus is unavailable. Run a headless control process with `uv run pivot --dbus-only`, or disable export with `--no-dbus`. See [the control protocol](doc/control-dbus.md).
+While a CLI process is running, pivot exports a narrow framework control surface on the session D-Bus as `org.pivot.Control` at `/org/pivot/Control`. Instance adapters inject typed stimulus envelopes and consume transport-neutral outputs; they cannot remotely execute capabilities, manage workers, or bypass the main Agent. Framework operations are limited to status, stimulus inspection/cancellation, interruption, reload requests, and shutdown. Run a headless persistent reactor with `uv run pivot --dbus-only`, or disable export with `--no-dbus`. See [the stimulus protocol](doc/stimuli.md) and [D-Bus control protocol](doc/control-dbus.md).
 
 Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+B` to toggle the agent sidebar, `Ctrl+G` to interrupt the main agent and its active workers, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The prompt accepts `/agents`, `/agent`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits and delegated workers stop during safe polling boundaries, while a synchronous model, capability, or executor request stops at its next safe boundary. The same runtime is available through `pivot.PivotClient.run_main` for non-terminal clients.
 
-The main agent has a single FIFO mailbox shared by local and remote callers. New messages are accepted while it is active, remain visibly queued, and run in receipt order; cancelling one queued request does not block later messages. Worker agents remain directly scheduled by the main agent and do not use this mailbox.
+The main Agent continuously consumes a durable SQLite inbox. Commands, observations, timers, system notices, and worker reports use one `StimulusEnvelope` contract. Priority selects urgent work while equal-priority inputs retain FIFO order; explicit source-local deduplication keys make adapter retries idempotent. Claimed inputs are returned to the queue after a runtime restart.
+
+Wake-word detection, speech recognition, audio capture, TTS, sensor threshold policies, and other device-specific I/O belong to the instance. Pivot provides only the framework envelope and output contracts. For example, an instance voice adapter can inject a final transcript as a `command` and consume its correlated output without introducing voice code into the framework.
 
 The TUI shows the selected provider, model, persistent Agent, capabilities, events, and live dependency health without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
@@ -33,7 +35,7 @@ instance/
 ├── environment/{think,measure,work,event}/
 ├── events/
 ├── logs/pivot.log
-├── memory/pivot.db       # SQLite WAL: agents, activations, messages, memories, tasks, continuations, world state
+├── memory/pivot.db       # SQLite WAL: agents, stimuli, outputs, activations, memory, tasks and world state
 ├── runtime.lock          # exclusive process lease while pivot owns this instance
 ├── config.toml
 └── credentials.toml        # named LLM providers, mode 0600
@@ -86,7 +88,7 @@ The corresponding environment variables are `PIVOT_LOG_DISPLAY_LEVEL` and `PIVOT
 
 ## Architecture
 
-`pivot.config` bootstraps an instance; `pivot.logging` configures terminal and rotating-file output; `pivot.dependencies` manages external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts provider responses; `pivot.actions` normalizes every model action; `pivot.capabilities` dispatches `think`, `measure` and `work`; `pivot.executors` performs concrete execution; `pivot.events` owns event waits; `pivot.agents` owns main/worker control; `pivot.memory` owns durable identity and layered memory; and `pivot.activation` runs finite model/action activations for persistent Agents.
+`pivot.config` bootstraps an instance; `pivot.logging` configures output; `pivot.dependencies` manages external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts provider responses; `pivot.stimuli` owns the durable inbox, outputs and main-Agent reactor; `pivot.actions` normalizes model actions; `pivot.capabilities` dispatches `think`, `measure` and `work`; `pivot.executors` performs concrete execution; `pivot.events` owns event waits; `pivot.agents` owns main/worker control; `pivot.memory` owns durable identity and layered memory; and `pivot.activation` runs finite model/action activations.
 
 The preferred model operation is the single `pivot_action` tool with `{kind, name, arguments}`. The same detector accepts a textual fallback in the form `<pivot-action>{JSON}</pivot-action>`. Capability calls, event waits, framework control, executor requests, and memory operations all pass through this normalized route. Provider-native capability and event tools are normalized through the same router. See [agent control, actions, and executors](doc/agent-control.md) for the operation contract.
 
@@ -108,7 +110,7 @@ Think descriptors are injected lazily. The model sees their names and summaries 
 
 Events are generic monitored fields rather than fixed thresholds. An event descriptor advertises a field and supported operators. A worker calls `pivot_wait_event` with the chosen operator, expected value, and timeout. A matching value, timeout, or isolated source error is formatted with the event's injection template, appended as a tool result, and resumes that worker activation.
 
-Long event waits belong to delegated workers. The persistent main agent does not advertise the native wait tool, and direct main-agent waits longer than one second are rejected with guidance to delegate. `agent.delegate` and `agent.assign` start workers asynchronously; completion, failure, or cancellation is delivered later through the main-agent FIFO mailbox as an internal input.
+Long event waits belong to delegated workers. The persistent main Agent does not advertise the native wait tool, and direct waits longer than one second are rejected with guidance to delegate. Worker completion, failure, or cancellation is delivered later as a typed `worker_report` stimulus. Instance event adapters publish `observation` stimuli for autonomous device monitoring.
 
 Memory is not an unbounded prompt transcript. Every activation and message is appended to `memory/pivot.db`; prompt construction selects only a bounded recent window, retrieves relevant sourced memories, and injects non-expired world state. Runtime capability/event/control descriptions are rebuilt on every model round, so old environment snapshots are never replayed as durable messages. Long-term records use `fact`, `preference`, `episode`, or `procedure` kinds with confidence, validity, source, sensitivity, and supersession metadata. See [the memory model](doc/memory.md).
 

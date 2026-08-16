@@ -2,7 +2,7 @@
 
 ## Main-Agent ownership
 
-Each pivot instance has one stable main-Agent UUID stored in `memory/pivot.db`. CLI, TUI, `PivotClient.run_main`, and D-Bus `SendMessage` all route user input to this Agent. Delegated workers have separate identities and activation histories in the same database; they are observable but never selectable as user endpoints.
+Each pivot instance has one stable main-Agent UUID stored in `memory/pivot.db`. CLI, TUI, instance adapters, and D-Bus `Inject` all create a `command` or other typed stimulus for this Agent. Delegated workers have separate identities and activation histories in the same database; they are observable but never selectable as user endpoints.
 
 The main Agent can solve a request directly or invoke asynchronous `agent.delegate`:
 
@@ -58,7 +58,7 @@ agent.delegate  {task, name?, capabilities?, events?}
 agent.report    {result}                              # worker only
 ```
 
-`agent.delegate` combines create and asynchronous assignment; report delivery is a later mailbox activation. Main activation completion does not wait for the worker. Long event waits are therefore assigned to workers, while the main Agent remains available for queued user input.
+`agent.delegate` combines create and asynchronous assignment; report delivery is a later `worker_report` stimulus. Main activation completion does not wait for the worker. Long event waits are therefore assigned to workers, while the main Agent remains available for all queued stimuli.
 
 Cancellation is cooperative. Model and subprocess requests stop at their next safe return boundary, while event polling checks cancellation directly. Runtime shutdown cancels active work and waits for Agent cleanup before closing durable memory.
 

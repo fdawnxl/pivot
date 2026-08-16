@@ -8,7 +8,7 @@ Runtime assembly first acquires an exclusive process lease in the resolved insta
 
 The memory database owns one stable main-Agent UUID, enforced by a unique SQLite index. The identity is generated once rather than derived from a filesystem path. User-facing clients always submit to this Agent. Worker Agents are durable internal identities created and scheduled by the main Agent, but they are not user-selectable endpoints.
 
-All user-facing submissions reserve a position in one main-Agent FIFO mailbox before entering the control worker pool. Only the request at the head may activate the main Agent; later requests remain queued. Cancelling any queued position advances the mailbox safely. Worker execution bypasses this admission path because workers are explicitly owned and scheduled by the main Agent.
+Every external stimulus is normalized into a `StimulusEnvelope` and appended to a SQLite-backed main-Agent inbox. Commands, device observations, timer notices, system notices, and worker reports share the same target, validation, priority, deduplication, lifecycle, and recovery rules. The reactor claims the highest-priority queued item while preserving FIFO order within a priority. The main Agent is therefore a continuously running consumer rather than a session created by a client request.
 
 ## Persistent Agents and finite activations
 
@@ -26,9 +26,9 @@ Static runtime context is never saved as prompt history. This prevents stale cap
 
 ## Worker scheduling and event waits
 
-`AgentControl` lets the main Agent create a worker, assign explicit capability/event allowlists, submit a task, observe progress, and receive a structured report. `agent.delegate` creates and starts a worker asynchronously. Worker completion, failure, or cancellation is reinjected through the main-Agent FIFO mailbox instead of blocking the activation that created it.
+`AgentControl` lets the main Agent create a worker, assign explicit capability/event allowlists, submit a task, observe progress, and receive a structured report. Worker completion, failure, or cancellation becomes a typed `worker_report` stimulus. It is never serialized into a special user-visible message or delivered through a remote Agent control method.
 
-The event runtime separates generic sources from per-request conditions. Event scripts expose `-l` descriptors containing a stable name, field, supported operators, and injection templates; they do not fix a threshold. The native `pivot_wait_event` tool is advertised to workers, which own normal long-lived waits without occupying the main-Agent mailbox. Direct main-Agent waits over one second are rejected. `EventService` creates a FIFO wait, polls only sources with active waiters, and returns a matched, timeout, or source-error notification as a tool message. Waiting conditions and outcomes are recorded as durable continuations.
+The event runtime separates generic sources from per-request conditions. An instance event adapter can publish an `observation` stimulus after applying threshold, debounce, hysteresis, and cooldown rules. The native `pivot_wait_event` tool remains available to workers for compatibility, while normal device monitoring is push-based and does not occupy a main-Agent activation. Waiting conditions and outcomes are recorded as durable continuations.
 
 ## Capabilities, executors, and dependencies
 
@@ -40,6 +40,6 @@ External dependencies are standalone uv projects under `instance/dependencies`. 
 
 ## Control and presentation
 
-`pivot.runtime` exposes `PivotClient.main_agent` and `PivotClient.run_main` independently from presentation. The Textual application shows the main timeline plus a read-only Agent lifecycle sidebar. Progress callbacks update one trace containing model, capability, event, executor, memory, control, delegation, and integration phases.
+`pivot.runtime` exposes a persistent reactor and provider-neutral stimulus/output methods independently from presentation. `PivotClient.run_main` is only a synchronous convenience wrapper around command injection. The Textual application uses the same envelope path as an instance adapter and shows the main timeline plus a read-only Agent lifecycle sidebar.
 
-`pivot.control` is the shared application command surface. Local clients call it directly; `pivot.dbus_control` exports the same object through `org.pivot.Control1` without making CLI/TUI behavior depend on D-Bus. Fast reads are synchronous, while main-Agent activations and other work run as observable asynchronous control tasks. The generic operation registry makes future operations remotely available without extending the D-Bus ABI for every feature.
+`pivot.control` is the shared framework surface. Local clients and `pivot.dbus_control` both inject envelopes, inspect durable stimulus/output state, interrupt active work, and request reload or shutdown. Agent-level operations remain inside model activations and cannot be invoked as remote control shortcuts.
