@@ -93,13 +93,21 @@ class ShellExecutor:
         requested_timeout = arguments.get("timeout", self.timeout)
         if not isinstance(command, str) or not command.strip() or "\x00" in command:
             raise ExecutorError("Shell command must be a non-empty string")
-        if not isinstance(requested_timeout, (int, float)) or isinstance(requested_timeout, bool):
+        if not isinstance(requested_timeout, (int, float)) or isinstance(
+            requested_timeout, bool
+        ):
             raise ExecutorError("Shell timeout must be a number")
         if requested_timeout <= 0 or requested_timeout > self.timeout:
-            raise ExecutorError(f"Shell timeout must be between 0 and {self.timeout:g} seconds")
-        environment = {key: value for key, value in os.environ.items() if key in _ENVIRONMENT_KEYS}
+            raise ExecutorError(
+                f"Shell timeout must be between 0 and {self.timeout:g} seconds"
+            )
+        environment = {
+            key: value for key, value in os.environ.items() if key in _ENVIRONMENT_KEYS
+        }
         environment["PIVOT_INSTANCE_PATH"] = str(self.instance)
-        LOGGER.info("Shell executor started timeout=%g cwd=%s", requested_timeout, self.instance)
+        LOGGER.info(
+            "Shell executor started timeout=%g cwd=%s", requested_timeout, self.instance
+        )
         try:
             result = subprocess.run(
                 [self.shell, "-c", command],
@@ -111,14 +119,31 @@ class ShellExecutor:
             )
         except subprocess.TimeoutExpired as exc:
             LOGGER.warning("Shell executor timed out timeout=%g", requested_timeout)
-            raise ExecutorError(f"Shell command timed out after {requested_timeout:g} seconds") from exc
+            raise ExecutorError(
+                f"Shell command timed out after {requested_timeout:g} seconds"
+            ) from exc
         except OSError as exc:
-            LOGGER.error("Shell executor could not start error_type=%s", type(exc).__name__)
-            raise ExecutorError(f"Unable to start shell executor: {type(exc).__name__}") from exc
-        stdout = result.stdout[-self.max_output_bytes :].decode("utf-8", errors="replace")
-        stderr = result.stderr[-self.max_output_bytes :].decode("utf-8", errors="replace")
-        truncated = len(result.stdout) > self.max_output_bytes or len(result.stderr) > self.max_output_bytes
-        LOGGER.info("Shell executor completed exit_code=%d truncated=%s", result.returncode, truncated)
+            LOGGER.error(
+                "Shell executor could not start error_type=%s", type(exc).__name__
+            )
+            raise ExecutorError(
+                f"Unable to start shell executor: {type(exc).__name__}"
+            ) from exc
+        stdout = result.stdout[-self.max_output_bytes :].decode(
+            "utf-8", errors="replace"
+        )
+        stderr = result.stderr[-self.max_output_bytes :].decode(
+            "utf-8", errors="replace"
+        )
+        truncated = (
+            len(result.stdout) > self.max_output_bytes
+            or len(result.stderr) > self.max_output_bytes
+        )
+        LOGGER.info(
+            "Shell executor completed exit_code=%d truncated=%s",
+            result.returncode,
+            truncated,
+        )
         return {
             "exit_code": result.returncode,
             "stdout": stdout,
@@ -136,11 +161,15 @@ class ExecutorRegistry:
     def register(self, executor: Executor) -> None:
         descriptor = executor.descriptor
         if not descriptor.name or descriptor.name in self._executors:
-            raise ExecutorError(f"Executor already registered or invalid: {descriptor.name!r}")
+            raise ExecutorError(
+                f"Executor already registered or invalid: {descriptor.name!r}"
+            )
         self._executors[descriptor.name] = executor
 
     def descriptors(self) -> tuple[ExecutorDescriptor, ...]:
-        return tuple(self._executors[name].descriptor for name in sorted(self._executors))
+        return tuple(
+            self._executors[name].descriptor for name in sorted(self._executors)
+        )
 
     def prompt_context(self) -> list[dict[str, Any]]:
         return [item.as_prompt_dict() for item in self.descriptors()]

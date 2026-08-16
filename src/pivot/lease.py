@@ -57,7 +57,9 @@ class RuntimeLease:
                 f"Cannot acquire pivot runtime lease for {self.instance_path}: {type(exc).__name__}"
             ) from exc
         self._handle = handle
-        LOGGER.info("Runtime lease acquired instance=%s pid=%d", self.instance_path, os.getpid())
+        LOGGER.info(
+            "Runtime lease acquired instance=%s pid=%d", self.instance_path, os.getpid()
+        )
 
     def release(self) -> None:
         """Release the lease if it is held."""

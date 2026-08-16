@@ -14,7 +14,9 @@ from .models import MessageContent, ParsedResponse, ToolCall
 
 ACTION_TOOL = "pivot_action"
 ACTION_TAG = "pivot-action"
-_TAGGED_ACTION = re.compile(r"<pivot-action>\s*(.*?)\s*</pivot-action>", re.DOTALL | re.IGNORECASE)
+_TAGGED_ACTION = re.compile(
+    r"<pivot-action>\s*(.*?)\s*</pivot-action>", re.DOTALL | re.IGNORECASE
+)
 _FENCED_ACTION = re.compile(r"```pivot-action\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 
@@ -74,7 +76,10 @@ def action_tool() -> dict[str, Any]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "kind": {"type": "string", "enum": [item.value for item in ActionKind]},
+                    "kind": {
+                        "type": "string",
+                        "enum": [item.value for item in ActionKind],
+                    },
                     "name": {"type": "string", "minLength": 1},
                     "arguments": {"type": "object"},
                 },
@@ -124,7 +129,9 @@ class ActionDetector:
             for part in content:
                 normalized = dict(part)
                 if isinstance(normalized.get("text"), str):
-                    normalized["text"] = _strip_action_markup(normalized["text"]).strip()
+                    normalized["text"] = _strip_action_markup(
+                        normalized["text"]
+                    ).strip()
                 parts.append(normalized)
             content = tuple(parts)
         return DetectedActions(text, content, tuple(calls), tuple(actions))
@@ -140,12 +147,22 @@ class ActionDetector:
         if call.name == EVENT_WAIT_TOOL:
             return ActionRequest(ActionKind.EVENT, "wait", dict(call.arguments), call)
         if call.name in executor_tools:
-            return ActionRequest(ActionKind.EXECUTOR, executor_tools[call.name], dict(call.arguments), call)
+            return ActionRequest(
+                ActionKind.EXECUTOR,
+                executor_tools[call.name],
+                dict(call.arguments),
+                call,
+            )
         # Existing provider-native capability calls remain supported and pass
         # through the same normalized routing path. Unknown tools intentionally
         # reach the capability registry so it can return its diagnostic error.
-        if call.name in capability_names or call.name not in {ACTION_TOOL, EVENT_WAIT_TOOL}:
-            return ActionRequest(ActionKind.CAPABILITY, call.name, dict(call.arguments), call)
+        if call.name in capability_names or call.name not in {
+            ACTION_TOOL,
+            EVENT_WAIT_TOOL,
+        }:
+            return ActionRequest(
+                ActionKind.CAPABILITY, call.name, dict(call.arguments), call
+            )
         raise ActionError(f"Unsupported framework tool: {call.name}")
 
     def _from_json(self, value: str) -> ActionRequest:
@@ -166,7 +183,9 @@ class ActionDetector:
         name = value.get("name")
         arguments = value.get("arguments")
         try:
-            alias = _ACTION_KIND_ALIASES.get(kind, kind) if isinstance(kind, str) else kind
+            alias = (
+                _ACTION_KIND_ALIASES.get(kind, kind) if isinstance(kind, str) else kind
+            )
             normalized_kind = ActionKind(alias)
         except (TypeError, ValueError) as exc:
             raise ActionError(f"Unknown pivot action kind: {kind!r}") from exc

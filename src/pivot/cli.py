@@ -20,12 +20,32 @@ LOGGER = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pivot", description="Run the persistent pivot main agent")
-    parser.add_argument("--instance", help="Path to the pivot instance (or set PIVOT_INSTANCE_PATH)")
-    parser.add_argument("--no-banner", action="store_true", help="Suppress the startup logo and runtime summary")
-    parser.add_argument("--no-dbus", action="store_true", help="Do not export the pivot D-Bus control interface")
-    parser.add_argument("--dbus-only", action="store_true", help="Run only the D-Bus control service until interrupted")
-    parser.add_argument("message", nargs="?", help="One user message; omit for interactive mode or stdin")
+    parser = argparse.ArgumentParser(
+        prog="pivot", description="Run the persistent pivot main agent"
+    )
+    parser.add_argument(
+        "--instance", help="Path to the pivot instance (or set PIVOT_INSTANCE_PATH)"
+    )
+    parser.add_argument(
+        "--no-banner",
+        action="store_true",
+        help="Suppress the startup logo and runtime summary",
+    )
+    parser.add_argument(
+        "--no-dbus",
+        action="store_true",
+        help="Do not export the pivot D-Bus control interface",
+    )
+    parser.add_argument(
+        "--dbus-only",
+        action="store_true",
+        help="Run only the D-Bus control service until interrupted",
+    )
+    parser.add_argument(
+        "message",
+        nargs="?",
+        help="One user message; omit for interactive mode or stdin",
+    )
     return parser
 
 
@@ -61,7 +81,9 @@ def _run_once(args: argparse.Namespace) -> tuple[int, bool]:
 
     client: PivotClient | None = None
     try:
-        client = PivotClient(build_runtime(PivotConfig.load(instance_path=args.instance)))
+        client = PivotClient(
+            build_runtime(PivotConfig.load(instance_path=args.instance))
+        )
         runtime = client.runtime
         agent_id = client.main_agent_id
         dbus_required = args.dbus_only
@@ -75,7 +97,9 @@ def _run_once(args: argparse.Namespace) -> tuple[int, bool]:
             except ControlDBusError:
                 if dbus_required:
                     raise
-                LOGGER.warning("D-Bus control is unavailable; continuing with the local client")
+                LOGGER.warning(
+                    "D-Bus control is unavailable; continuing with the local client"
+                )
         elif dbus_required:
             raise ConfigurationError("D-Bus control is disabled by configuration")
         if args.dbus_only:
@@ -112,6 +136,7 @@ def _wait_for_shutdown(client: PivotClient) -> bool:
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous[signum] = signal.signal(signum, request_stop)
+
     def control_event(event: str, _payload: object) -> None:
         if event == "reload_requested":
             reload_requested.set()

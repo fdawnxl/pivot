@@ -6,14 +6,20 @@ from pivot.config import ConfigurationError, PivotConfig
 from pivot.credentials import CredentialStore, ProviderCredential
 
 
-def test_instance_bootstrap_and_environment_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_instance_bootstrap_and_environment_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     instance = tmp_path / "instance"
     (instance / "config.toml").parent.mkdir()
-    (instance / "config.toml").write_text('provider = "file-provider"\nmax_rounds = 3\n', encoding="utf-8")
+    (instance / "config.toml").write_text(
+        'provider = "file-provider"\nmax_rounds = 3\n', encoding="utf-8"
+    )
     CredentialStore(instance / "credentials.toml").save(
         {
             "file-provider": ProviderCredential("file-provider", "file-model"),
-            "env-provider": ProviderCredential("env-provider", "env-model", "https://example.test/v1", "secret"),
+            "env-provider": ProviderCredential(
+                "env-provider", "env-model", "https://example.test/v1", "secret"
+            ),
         }
     )
     monkeypatch.setenv("PIVOT_PROVIDER", "env-provider")
@@ -37,15 +43,21 @@ def test_instance_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
         PivotConfig.load()
 
 
-def test_codex_files_are_not_runtime_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_files_are_not_runtime_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     codex_home = tmp_path / "home" / ".codex"
     codex_home.mkdir(parents=True)
-    (codex_home / "config.toml").write_text('model = "codex-only-model"\n', encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        'model = "codex-only-model"\n', encoding="utf-8"
+    )
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     instance = tmp_path / "instance"
     instance.mkdir()
     (instance / "config.toml").write_text('provider = "local"\n', encoding="utf-8")
-    CredentialStore(instance / "credentials.toml").save({"local": ProviderCredential("local", "local-model")})
+    CredentialStore(instance / "credentials.toml").save(
+        {"local": ProviderCredential("local", "local-model")}
+    )
     config = PivotConfig.load(instance_path=instance)
     assert config.provider.model == "local-model"
 
@@ -56,7 +68,9 @@ def test_instance_credentials_are_restricted(tmp_path: Path) -> None:
     (instance / "config.toml").write_text('provider = "local"\n', encoding="utf-8")
     CredentialStore(instance / "credentials.toml").save(
         {
-            "local": ProviderCredential("local", "local-model", "https://example.invalid/v1", "test-secret"),
+            "local": ProviderCredential(
+                "local", "local-model", "https://example.invalid/v1", "test-secret"
+            ),
             "backup": ProviderCredential("backup", "backup-model"),
         }
     )
@@ -72,7 +86,9 @@ def test_selected_provider_must_exist(tmp_path: Path) -> None:
     instance = tmp_path / "instance"
     instance.mkdir()
     (instance / "config.toml").write_text('provider = "missing"\n', encoding="utf-8")
-    CredentialStore(instance / "credentials.toml").save({"local": ProviderCredential("local", "model")})
+    CredentialStore(instance / "credentials.toml").save(
+        {"local": ProviderCredential("local", "model")}
+    )
     with pytest.raises(ConfigurationError, match="not defined"):
         PivotConfig.load(instance_path=instance)
 
@@ -92,12 +108,14 @@ def test_dbus_control_configuration_uses_environment_precedence(
     instance.mkdir()
     (instance / "config.toml").write_text(
         'provider = "local"\n'
-        'dbus_control_enabled = false\n'
+        "dbus_control_enabled = false\n"
         'dbus_control_bus = "system"\n'
         'dbus_control_service = "org.pivot.FromFile"\n',
         encoding="utf-8",
     )
-    CredentialStore(instance / "credentials.toml").save({"local": ProviderCredential("local", "model")})
+    CredentialStore(instance / "credentials.toml").save(
+        {"local": ProviderCredential("local", "model")}
+    )
     monkeypatch.setenv("PIVOT_DBUS_CONTROL_ENABLED", "true")
     monkeypatch.setenv("PIVOT_DBUS_CONTROL_BUS", "session")
     monkeypatch.setenv("PIVOT_DBUS_CONTROL_SERVICE", "org.pivot.FromEnvironment")

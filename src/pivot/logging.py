@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from collections.abc import Iterator
 from typing import Any, TextIO
-
 
 _HANDLER_MARKER = "_pivot_handler"
 _LEVEL_ALIASES = {"WARN": "WARNING"}
-_LOG_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar("pivot_log_context", default=None)
-_STANDARD_RECORD_FIELDS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+_LOG_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar(
+    "pivot_log_context", default=None
+)
+_STANDARD_RECORD_FIELDS = set(logging.makeLogRecord({}).__dict__) | {
+    "message",
+    "asctime",
+}
 _DEPENDENCY_LOGGERS = (
     "LiteLLM",
     "LiteLLM Proxy",
@@ -57,12 +61,20 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         document: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(
+                timespec="milliseconds"
+            ),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("correlation_id", "activation_id", "agent_id", "capability", "event"):
+        for key in (
+            "correlation_id",
+            "activation_id",
+            "agent_id",
+            "capability",
+            "event",
+        ):
             value = getattr(record, key, None)
             if value is not None:
                 document[key] = value
@@ -71,7 +83,14 @@ class JsonFormatter(logging.Formatter):
             for key, value in record.__dict__.items()
             if key not in _STANDARD_RECORD_FIELDS
             and key not in document
-            and key not in {"correlation_id", "activation_id", "agent_id", "capability", "event"}
+            and key
+            not in {
+                "correlation_id",
+                "activation_id",
+                "agent_id",
+                "capability",
+                "event",
+            }
             and isinstance(value, (str, int, float, bool, type(None)))
         }
         if extras:
@@ -104,7 +123,9 @@ def configure_tui_logging() -> None:
 
     root = logging.getLogger()
     for handler in tuple(root.handlers):
-        if getattr(handler, _HANDLER_MARKER, False) and not isinstance(handler, logging.FileHandler):
+        if getattr(handler, _HANDLER_MARKER, False) and not isinstance(
+            handler, logging.FileHandler
+        ):
             root.removeHandler(handler)
             handler.close()
     if root.handlers:
@@ -141,7 +162,9 @@ def configure_logging(
     if log_path is not None:
         path = Path(log_path).expanduser().resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        file_handler = RotatingFileHandler(
+            path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
         file_handler.setLevel(parse_log_level(file_level, default=logging.DEBUG))
         file_handler.setFormatter(JsonFormatter())
         file_handler.addFilter(ContextFilter())

@@ -18,10 +18,10 @@ from pivot.memory import RuntimeStore
 from pivot.models import CapabilityDescriptor, EventDescriptor, Message
 from pivot.runtime import PivotClient, Runtime
 from pivot.tui import (
+    PIVOT_THEME,
     AgentItem,
     AgentMessage,
     DependencyItem,
-    PIVOT_THEME,
     PivotApp,
     PromptEditor,
     WorkflowView,
@@ -62,8 +62,12 @@ def _runtime(tmp_path: Path, llm: Any | None = None) -> Runtime:
         executors=executors,
         max_rounds=8,
     )
-    config = PivotConfig(instance_path=tmp_path, provider=ProviderCredential("test", "test-model"))
-    return Runtime(config, registry, events, event_service, memory, main, None, executors, agents)
+    config = PivotConfig(
+        instance_path=tmp_path, provider=ProviderCredential("test", "test-model")
+    )
+    return Runtime(
+        config, registry, events, event_service, memory, main, None, executors, agents
+    )
 
 
 def test_textual_cli_theme_and_bindings_are_global_agent_only() -> None:
@@ -87,11 +91,21 @@ def test_textual_cli_theme_and_bindings_are_global_agent_only() -> None:
     bindings = {binding.key: binding for binding in PivotApp.BINDINGS}
     assert {"ctrl+q", "ctrl+b", "ctrl+g", "ctrl+l"} <= bindings.keys()
     assert {"ctrl+n", "ctrl+left", "ctrl+right", "f2"}.isdisjoint(bindings)
-    labels = {state: DependencyItem(DependencyStatus("sensor", state))._label() for state in DependencyState}
-    assert "$success" in labels[DependencyState.READY] and "√" in labels[DependencyState.READY]
+    labels = {
+        state: DependencyItem(DependencyStatus("sensor", state))._label()
+        for state in DependencyState
+    }
+    assert (
+        "$success" in labels[DependencyState.READY]
+        and "√" in labels[DependencyState.READY]
+    )
     assert all(
         "$warning" in labels[state] and "⚪" in labels[state]
-        for state in (DependencyState.STARTING, DependencyState.DEGRADED, DependencyState.STOPPING)
+        for state in (
+            DependencyState.STARTING,
+            DependencyState.DEGRADED,
+            DependencyState.STOPPING,
+        )
     )
     assert all(
         "$error" in labels[state] and "×" in labels[state]
@@ -101,7 +115,9 @@ def test_textual_cli_theme_and_bindings_are_global_agent_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_displays_agent_dependencies_and_global_controls(tmp_path: Path) -> None:
+async def test_textual_cli_displays_agent_dependencies_and_global_controls(
+    tmp_path: Path,
+) -> None:
     class Dependencies:
         refreshed = False
 
@@ -168,7 +184,10 @@ def test_tui_renders_external_stimuli_without_device_specific_assumptions() -> N
         )
     ]
     assert list(_visible_messages(messages)) == [
-        ("notice", 'OBSERVATION · instance.sensor\n{"event":"temperature.high","value":83}')
+        (
+            "notice",
+            'OBSERVATION · instance.sensor\n{"event":"temperature.high","value":83}',
+        )
     ]
 
 
@@ -182,12 +201,25 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
             self.calls += 1
             if self.calls % 2:
                 return {
-                    "choices": [{"message": {"tool_calls": [{
-                        "id": "tool-1",
-                        "function": {"name": "echo", "arguments": '{"value":"measured"}'},
-                    }]}}]
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "id": "tool-1",
+                                        "function": {
+                                            "name": "echo",
+                                            "arguments": '{"value":"measured"}',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
                 }
-            return {"choices": [{"message": {"content": "The result is **measured**."}}]}
+            return {
+                "choices": [{"message": {"content": "The result is **measured**."}}]
+            }
 
     runtime = _runtime(tmp_path, ToolLLM())
     runtime.registry.register(
@@ -202,7 +234,9 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
         await pilot.press("enter")
         await pilot.pause(0.3)
         workflow = app.query_one(WorkflowView)
-        assert [(step.kind, step.name, step.state) for step in workflow.state.steps] == [
+        assert [
+            (step.kind, step.name, step.state) for step in workflow.state.steps
+        ] == [
             ("model", "model-round-1", "done"),
             ("capability", "echo", "done"),
             ("model", "model-round-2", "done"),
@@ -215,14 +249,20 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_textual_cli_queues_messages_while_main_agent_runs(tmp_path: Path) -> None:
+async def test_textual_cli_queues_messages_while_main_agent_runs(
+    tmp_path: Path,
+) -> None:
     started = threading.Event()
     release = threading.Event()
     prompts: list[str] = []
 
     class SlowLLM:
         def complete(self, messages, *, tools=()):
-            prompt = next(message.content for message in reversed(messages) if message.role == "user")
+            prompt = next(
+                message.content
+                for message in reversed(messages)
+                if message.role == "user"
+            )
             prompts.append(prompt)
             if prompt == "first":
                 started.set()
@@ -243,7 +283,9 @@ async def test_textual_cli_queues_messages_while_main_agent_runs(tmp_path: Path)
         release.set()
         await pilot.pause(0.8)
         assert prompts == ["first", "second"]
-        assert [item.content for item in app.query(AgentMessage) if item.role == "assistant"] == [
+        assert [
+            item.content for item in app.query(AgentMessage) if item.role == "assistant"
+        ] == [
             "ack first",
             "ack second",
         ]
@@ -274,7 +316,9 @@ async def test_textual_cli_interrupts_active_activation(tmp_path: Path) -> None:
         release.set()
         await pilot.pause(0.3)
         assert turn.interrupted
-        assert all(message.content != "late response" for message in app.query(AgentMessage))
+        assert all(
+            message.content != "late response" for message in app.query(AgentMessage)
+        )
         assert list(app.query(AgentMessage))[-1].content == "Turn interrupted."
     client.close()
 
@@ -299,7 +343,9 @@ async def test_textual_cli_commands_and_compact_layout(tmp_path: Path) -> None:
     client.close()
 
 
-def test_pivot_client_exposes_gateway_without_mutable_main_agent(tmp_path: Path) -> None:
+def test_pivot_client_exposes_gateway_without_mutable_main_agent(
+    tmp_path: Path,
+) -> None:
     client = PivotClient(_runtime(tmp_path))
     try:
         assert not hasattr(client, "main_agent")
@@ -307,6 +353,9 @@ def test_pivot_client_exposes_gateway_without_mutable_main_agent(tmp_path: Path)
         assert not hasattr(client.control, "submit")
         assert not hasattr(client.control, "operations")
         assert client.run_main("hello") == "ack"
-        assert [message.role for message in client.main_history()] == ["user", "assistant"]
+        assert [message.role for message in client.main_history()] == [
+            "user",
+            "assistant",
+        ]
     finally:
         client.close()

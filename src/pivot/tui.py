@@ -15,15 +15,24 @@ from textual.binding import Binding
 from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
 from textual.message import Message as TextualMessage
 from textual.theme import Theme
-from textual.widgets import Button, Label, ListItem, ListView, LoadingIndicator, Markdown, Static, TextArea
+from textual.widgets import (
+    Button,
+    Label,
+    ListItem,
+    ListView,
+    LoadingIndicator,
+    Markdown,
+    Static,
+    TextArea,
+)
 
+from .activation import ActivationProgress, AgentCancelled, CancellationToken
 from .agents import AgentRecord
 from .dependencies import DependencyState, DependencyStatus
 from .models import Message
 from .runtime import PivotClient
-from .activation import ActivationProgress, AgentCancelled, CancellationToken
-from .ui import safe_endpoint
 from .stimuli import StimulusState
+from .ui import safe_endpoint
 
 LOGGER = logging.getLogger(__name__)
 
@@ -100,7 +109,12 @@ class AgentMessage(Vertical):
         self.content = content
 
     def compose(self) -> ComposeResult:
-        labels = {"user": "YOU", "assistant": "PIVOT", "notice": "SYSTEM", "error": "ERROR"}
+        labels = {
+            "user": "YOU",
+            "assistant": "PIVOT",
+            "notice": "SYSTEM",
+            "error": "ERROR",
+        }
         yield Label(labels.get(self.role, self.role.upper()), classes="message-label")
         if self.role == "assistant":
             yield Markdown(self.content or "_(empty response)_", classes="message-body")
@@ -112,7 +126,16 @@ class AgentMessage(Vertical):
 class WorkflowStep:
     """One inspectable model, capability, or event phase in a turn."""
 
-    kind: Literal["model", "decision", "capability", "event", "executor", "control", "memory", "agent"]
+    kind: Literal[
+        "model",
+        "decision",
+        "capability",
+        "event",
+        "executor",
+        "control",
+        "memory",
+        "agent",
+    ]
     name: str
     label: str
     round_number: int
@@ -234,6 +257,7 @@ class DependencyItem(Static):
         }
         return f"{markers[self.status.state]}  {escape(self.status.dependency_id)}"
 
+
 class PivotApp(App[None]):
     """Main-agent terminal client with inspectable delegated workers."""
 
@@ -245,8 +269,16 @@ class PivotApp(App[None]):
         Binding("ctrl+b", "toggle_agents", "Agents", priority=True),
         Binding("ctrl+g", "interrupt_turn", "Stop", priority=True),
         Binding("ctrl+l", "focus_prompt", "Prompt", priority=True),
-        Binding("ctrl+up", "scroll_timeline_up", "Scroll up", show=False, priority=True),
-        Binding("ctrl+down", "scroll_timeline_down", "Scroll down", show=False, priority=True),
+        Binding(
+            "ctrl+up", "scroll_timeline_up", "Scroll up", show=False, priority=True
+        ),
+        Binding(
+            "ctrl+down",
+            "scroll_timeline_down",
+            "Scroll down",
+            show=False,
+            priority=True,
+        ),
     ]
     CSS = """
     Screen {
@@ -578,7 +610,9 @@ class PivotApp(App[None]):
         config = self.runtime.config
         with Horizontal(id="topbar"):
             yield Static("PIVOT", id="brand")
-            yield Static(f"{config.provider.name}  /  {config.provider.model}", id="runtime-meta")
+            yield Static(
+                f"{config.provider.name}  /  {config.provider.model}", id="runtime-meta"
+            )
         with Horizontal(id="body"):
             with Vertical(id="agents-pane"):
                 yield Label("AGENTS", classes="section-title")
@@ -601,19 +635,28 @@ class PivotApp(App[None]):
                     yield Button("Send", id="send", variant="primary")
                     yield Button("Stop", id="stop")
         with HorizontalScroll(id="shortcut-bar"):
-            yield Button("Agents (Ctrl+B)", id="shortcut-agents", classes="shortcut-button")
+            yield Button(
+                "Agents (Ctrl+B)", id="shortcut-agents", classes="shortcut-button"
+            )
             yield Button("Stop (Ctrl+G)", id="shortcut-stop", classes="shortcut-button")
-            yield Button("Prompt (Ctrl+L)", id="shortcut-prompt", classes="shortcut-button")
+            yield Button(
+                "Prompt (Ctrl+L)", id="shortcut-prompt", classes="shortcut-button"
+            )
             yield Button("Quit (Ctrl+Q)", id="shortcut-quit", classes="shortcut-button")
 
     async def on_mount(self) -> None:
-        self._control_unsubscribe = self.client.control.subscribe(self._on_control_event)
+        self._control_unsubscribe = self.client.control.subscribe(
+            self._on_control_event
+        )
         compact = self.size.width < 90
         self.set_class(compact, "compact")
         self.query_one("#body").set_class(compact, "agents-hidden")
         await self._refresh_agent_list()
         await self._refresh_dependency_list()
-        if self.runtime.dependencies is not None and self.runtime.dependencies.descriptors():
+        if (
+            self.runtime.dependencies is not None
+            and self.runtime.dependencies.descriptors()
+        ):
             self.set_interval(5.0, self._request_dependency_refresh)
         await self._show_main_agent()
         self.query_one("#prompt", PromptEditor).focus()
@@ -638,10 +681,11 @@ class PivotApp(App[None]):
             self.exit()
             return
         agent_id = payload.get("target_agent_id")
-        if (
-            event == "stimulus_changed"
-            and payload.get("state") in {"completed", "failed", "cancelled"}
-        ):
+        if event == "stimulus_changed" and payload.get("state") in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
             self._schedule_agent_refresh()
             correlation_id = payload.get("correlation_id")
             if (
@@ -662,7 +706,9 @@ class PivotApp(App[None]):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send":
-            await self._submit_prompt(self.query_one("#prompt", PromptEditor).text.strip())
+            await self._submit_prompt(
+                self.query_one("#prompt", PromptEditor).text.strip()
+            )
         elif event.button.id == "stop":
             self.action_interrupt_turn()
         elif event.button.id == "shortcut-agents":
@@ -677,7 +723,10 @@ class PivotApp(App[None]):
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, AgentItem):
             snapshot = event.item.record.as_dict()
-            scope = ", ".join(snapshot["capabilities"] + snapshot["events"]) or "no assigned resources"
+            scope = (
+                ", ".join(snapshot["capabilities"] + snapshot["events"])
+                or "no assigned resources"
+            )
             self.notify(f"{snapshot['name']}: {snapshot['state']} · {scope}")
 
     async def _submit_prompt(self, prompt: str) -> None:
@@ -708,7 +757,9 @@ class PivotApp(App[None]):
             try:
                 self.call_from_thread(self._receive_progress, turn.turn_id, update)
             except RuntimeError:
-                LOGGER.debug("TUI closed before progress delivery agent_id=%s", turn.agent_id)
+                LOGGER.debug(
+                    "TUI closed before progress delivery agent_id=%s", turn.agent_id
+                )
 
         try:
             stimulus_id = self.client.inject(
@@ -732,18 +783,36 @@ class PivotApp(App[None]):
             try:
                 self.call_from_thread(self._finish_turn, turn.turn_id, None, None, True)
             except RuntimeError:
-                LOGGER.debug("TUI closed before interruption delivery agent_id=%s", turn.agent_id)
+                LOGGER.debug(
+                    "TUI closed before interruption delivery agent_id=%s", turn.agent_id
+                )
         except Exception as exc:
-            LOGGER.error("Interactive turn failed agent_id=%s error_type=%s", turn.agent_id, type(exc).__name__)
+            LOGGER.error(
+                "Interactive turn failed agent_id=%s error_type=%s",
+                turn.agent_id,
+                type(exc).__name__,
+            )
             try:
-                self.call_from_thread(self._finish_turn, turn.turn_id, None, f"{type(exc).__name__}: {exc}", False)
+                self.call_from_thread(
+                    self._finish_turn,
+                    turn.turn_id,
+                    None,
+                    f"{type(exc).__name__}: {exc}",
+                    False,
+                )
             except RuntimeError:
-                LOGGER.debug("TUI closed before turn failure delivery agent_id=%s", turn.agent_id)
+                LOGGER.debug(
+                    "TUI closed before turn failure delivery agent_id=%s", turn.agent_id
+                )
         else:
             try:
-                self.call_from_thread(self._finish_turn, turn.turn_id, response, None, False)
+                self.call_from_thread(
+                    self._finish_turn, turn.turn_id, response, None, False
+                )
             except RuntimeError:
-                LOGGER.debug("TUI closed before turn result delivery agent_id=%s", turn.agent_id)
+                LOGGER.debug(
+                    "TUI closed before turn result delivery agent_id=%s", turn.agent_id
+                )
 
     def _receive_progress(self, turn_id: str, update: ActivationProgress) -> None:
         turn = self.turns.get(turn_id)
@@ -751,7 +820,11 @@ class PivotApp(App[None]):
             return
         if update.kind == "llm_waiting":
             round_number = update.round_number or 1
-            turn.status = "Understanding the request" if round_number == 1 else "Integrating capability results"
+            turn.status = (
+                "Understanding the request"
+                if round_number == 1
+                else "Integrating capability results"
+            )
             turn.steps.append(
                 WorkflowStep(
                     "model",
@@ -788,10 +861,17 @@ class PivotApp(App[None]):
                 )
             )
         elif update.kind == "capability_completed":
-            self._complete_step(turn, update.name or "capability", "done", _summarize(update.result, limit=240))
+            self._complete_step(
+                turn,
+                update.name or "capability",
+                "done",
+                _summarize(update.result, limit=240),
+            )
             turn.status = "Capability result received"
         elif update.kind == "capability_failed":
-            self._complete_step(turn, update.name or "capability", "failed", _summarize(update.result))
+            self._complete_step(
+                turn, update.name or "capability", "failed", _summarize(update.result)
+            )
             turn.status = "Recovering from capability error"
         elif update.kind == "event_wait_started":
             event_name = _event_name(update.result)
@@ -810,10 +890,13 @@ class PivotApp(App[None]):
         elif update.kind == "event_completed":
             state = (
                 "failed"
-                if isinstance(update.result, dict) and (update.result.get("status") == "error" or "error" in update.result)
+                if isinstance(update.result, dict)
+                and (update.result.get("status") == "error" or "error" in update.result)
                 else "done"
             )
-            self._complete_step(turn, update.name or "event", state, _summarize(update.result))
+            self._complete_step(
+                turn, update.name or "event", state, _summarize(update.result)
+            )
             turn.status = "Reviewing event"
         elif update.kind in {"executor_started", "control_started", "memory_started"}:
             kind = {
@@ -833,11 +916,22 @@ class PivotApp(App[None]):
                 )
             )
             turn.status = f"Running {update.name or kind}"
-        elif update.kind in {"executor_completed", "control_completed", "memory_completed"}:
-            self._complete_step(turn, update.name or "action", "done", _summarize(update.result, limit=240))
+        elif update.kind in {
+            "executor_completed",
+            "control_completed",
+            "memory_completed",
+        }:
+            self._complete_step(
+                turn,
+                update.name or "action",
+                "done",
+                _summarize(update.result, limit=240),
+            )
             turn.status = "Action result received"
         elif update.kind in {"executor_failed", "control_failed", "memory_failed"}:
-            self._complete_step(turn, update.name or "action", "failed", _summarize(update.result))
+            self._complete_step(
+                turn, update.name or "action", "failed", _summarize(update.result)
+            )
             turn.status = "Recovering from action error"
         elif update.kind == "agent_started":
             agent = _agent_snapshot(update.result)
@@ -847,7 +941,14 @@ class PivotApp(App[None]):
                     agent.get("agent_id", update.name or "worker"),
                     update.name or "worker",
                     update.round_number or 1,
-                    request=_summarize({"task": agent.get("task"), "capabilities": agent.get("capabilities"), "events": agent.get("events")}, limit=240),
+                    request=_summarize(
+                        {
+                            "task": agent.get("task"),
+                            "capabilities": agent.get("capabilities"),
+                            "events": agent.get("events"),
+                        },
+                        limit=240,
+                    ),
                 )
             )
             turn.status = f"Delegated to {update.name or 'worker'}"
@@ -859,9 +960,16 @@ class PivotApp(App[None]):
                 turn,
                 agent.get("agent_id", update.name or "worker"),
                 "done" if update.kind == "agent_completed" else "failed",
-                _summarize(agent.get("report") or agent.get("error") or update.message, limit=240),
+                _summarize(
+                    agent.get("report") or agent.get("error") or update.message,
+                    limit=240,
+                ),
             )
-            turn.status = "Worker report received" if update.kind == "agent_completed" else "Worker failed"
+            turn.status = (
+                "Worker report received"
+                if update.kind == "agent_completed"
+                else "Worker failed"
+            )
         elif update.kind == "activation_completed":
             self._complete_model_step(turn, update.round_number or 1, "Response ready")
         self._refresh_workflow(turn)
@@ -876,17 +984,27 @@ class PivotApp(App[None]):
         }:
             self._schedule_agent_refresh()
 
-    def _finish_turn(self, turn_id: str, response: str | None, error: str | None, interrupted: bool = False) -> None:
+    def _finish_turn(
+        self,
+        turn_id: str,
+        response: str | None,
+        error: str | None,
+        interrupted: bool = False,
+    ) -> None:
         turn = self.turns.get(turn_id)
         if turn is None:
             return
         turn.done = True
         turn.interrupted = interrupted
         turn.error = error
-        turn.status = "Interrupted" if interrupted else "Failed" if error else "Completed"
+        turn.status = (
+            "Interrupted" if interrupted else "Failed" if error else "Completed"
+        )
         for step in turn.steps:
             if step.state == "running":
-                step.state = "interrupted" if interrupted else "failed" if error else "done"
+                step.state = (
+                    "interrupted" if interrupted else "failed" if error else "done"
+                )
                 if interrupted:
                     step.result = "Stopped by the user"
         queued = self.agent_activations.get(turn.agent_id, [])
@@ -902,14 +1020,22 @@ class PivotApp(App[None]):
                 else:
                     workflow.refresh_state()
             if error:
-                self.query_one("#timeline", VerticalScroll).mount(AgentMessage("error", error))
+                self.query_one("#timeline", VerticalScroll).mount(
+                    AgentMessage("error", error)
+                )
             elif interrupted:
-                self.query_one("#timeline", VerticalScroll).mount(AgentMessage("notice", "Turn interrupted."))
+                self.query_one("#timeline", VerticalScroll).mount(
+                    AgentMessage("notice", "Turn interrupted.")
+                )
             else:
-                self.query_one("#timeline", VerticalScroll).mount(AgentMessage("assistant", response or ""))
+                self.query_one("#timeline", VerticalScroll).mount(
+                    AgentMessage("assistant", response or "")
+                )
             self.query_one("#timeline", VerticalScroll).scroll_end(animate=True)
         else:
-            outcome = "interrupted" if interrupted else "failed" if error else "completed"
+            outcome = (
+                "interrupted" if interrupted else "failed" if error else "completed"
+            )
             self.notify(f"Agent {turn.agent_id[:8]} {outcome}.")
         self._update_header()
         self._schedule_agent_refresh()
@@ -938,12 +1064,18 @@ class PivotApp(App[None]):
                 step.state = state
                 step.result = detail
                 return
-        turn.steps.append(WorkflowStep("capability", name, name, 1, state=state, result=detail))
+        turn.steps.append(
+            WorkflowStep("capability", name, name, 1, state=state, result=detail)
+        )
 
     @staticmethod
     def _complete_model_step(turn: TurnState, round_number: int, result: str) -> None:
         for step in reversed(turn.steps):
-            if step.kind == "model" and step.round_number == round_number and step.state == "running":
+            if (
+                step.kind == "model"
+                and step.round_number == round_number
+                and step.state == "running"
+            ):
                 step.state = "done"
                 step.result = result
                 return
@@ -958,7 +1090,14 @@ class PivotApp(App[None]):
         self._update_header()
 
     def _workflow_for(self, turn: TurnState) -> WorkflowView | None:
-        return next((view for view in self.query(WorkflowView) if view.state.turn_id == turn.turn_id), None)
+        return next(
+            (
+                view
+                for view in self.query(WorkflowView)
+                if view.state.turn_id == turn.turn_id
+            ),
+            None,
+        )
 
     async def _show_main_agent(self, *, focus_prompt: bool = True) -> None:
         agent_id = self.main_agent_id
@@ -966,7 +1105,9 @@ class PivotApp(App[None]):
         await timeline.remove_children()
         messages = tuple(_visible_messages(self.client.main_history()))
         if messages:
-            await timeline.mount(*(AgentMessage(role, content) for role, content in messages))
+            await timeline.mount(
+                *(AgentMessage(role, content) for role, content in messages)
+            )
         turn_ids = self.agent_activations.get(agent_id, [])
         for turn_id in turn_ids:
             turn = self.turns[turn_id]
@@ -1016,7 +1157,9 @@ class PivotApp(App[None]):
         if statuses:
             await view.mount(*(DependencyItem(status) for status in statuses))
         else:
-            await view.mount(Static("No dependencies", id="dependency-empty", markup=False))
+            await view.mount(
+                Static("No dependencies", id="dependency-empty", markup=False)
+            )
 
     def _request_dependency_refresh(self) -> None:
         self._refresh_dependencies()
@@ -1066,7 +1209,10 @@ class PivotApp(App[None]):
                 "Keys: Ctrl+G stop, Ctrl+B agents, Ctrl+L prompt, Ctrl+Q quit"
             )
         else:
-            await self._append_notice(f"Unknown command: {command}. Enter /help for available commands.", error=True)
+            await self._append_notice(
+                f"Unknown command: {command}. Enter /help for available commands.",
+                error=True,
+            )
         self.query_one("#prompt", PromptEditor).focus()
 
     async def _append_notice(self, content: str, *, error: bool = False) -> None:
@@ -1115,7 +1261,11 @@ class PivotApp(App[None]):
             self.exit()
             return
         self._quit_armed = True
-        self.notify("Agent work is still running. Press Ctrl+Q again to quit immediately.", severity="warning", timeout=3)
+        self.notify(
+            "Agent work is still running. Press Ctrl+Q again to quit immediately.",
+            severity="warning",
+            timeout=3,
+        )
         self.set_timer(3, self._disarm_quit)
 
     def _disarm_quit(self) -> None:
@@ -1176,7 +1326,9 @@ def _summarize(value: Any, *, limit: int = 120) -> str:
         text = value["message"]
     else:
         try:
-            text = json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+            text = json.dumps(
+                value, ensure_ascii=False, default=str, separators=(",", ":")
+            )
         except (TypeError, ValueError):
             text = str(value)
     text = " ".join(text.split())
@@ -1195,4 +1347,12 @@ def _agent_snapshot(value: Any) -> dict[str, Any]:
     return {}
 
 
-__all__ = ["AgentItem", "AgentMessage", "DependencyItem", "PivotApp", "PromptEditor", "WorkflowView", "run_tui"]
+__all__ = [
+    "AgentItem",
+    "AgentMessage",
+    "DependencyItem",
+    "PivotApp",
+    "PromptEditor",
+    "WorkflowView",
+    "run_tui",
+]

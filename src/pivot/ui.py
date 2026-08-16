@@ -7,7 +7,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .models import CapabilityDescriptor, EventDescriptor
 
-
 ASCII_LOGO = r"""
  ____  _            _
 |  _ \(_)_   _____ | |_
@@ -48,7 +47,9 @@ def safe_endpoint(endpoint: str | None) -> str:
 def render_banner(summary: RuntimeSummary) -> str:
     """Render the logo and runtime summary inside a terminal-friendly border."""
 
-    capabilities = ", ".join(f"{item.kind}:{item.name}" for item in summary.capabilities) or "none"
+    capabilities = (
+        ", ".join(f"{item.kind}:{item.name}" for item in summary.capabilities) or "none"
+    )
     events = ", ".join(item.name for item in summary.events) or "none"
     return render_box(
         "\n".join(
@@ -67,7 +68,9 @@ def render_banner(summary: RuntimeSummary) -> str:
     )
 
 
-def render_box(content: str, *, title: str | None = None, width: int | None = None) -> str:
+def render_box(
+    content: str, *, title: str | None = None, width: int | None = None
+) -> str:
     """Wrap header content in a compact terminal box."""
 
     lines = content.splitlines() or [""]

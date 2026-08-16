@@ -27,7 +27,9 @@ def register_instance_capabilities(
     loaded = 0
     for kind in ("think", "measure", "work"):
         capability_kind: CapabilityKind = kind
-        runner = CapabilityScriptRunner(environment_root / kind, instance=root, timeout=timeout)
+        runner = CapabilityScriptRunner(
+            environment_root / kind, instance=root, timeout=timeout
+        )
         directory = root / "capabilities" / kind
         for script in sorted(directory.glob("*.py")):
             try:
@@ -40,8 +42,14 @@ def register_instance_capabilities(
                     registry.register(descriptor, _work_handler(runner, script))
                 loaded += 1
             except CapabilityError as exc:
-                LOGGER.warning("Unable to register %s capability %s: %s", kind, script, exc)
-    LOGGER.info("Instance capability discovery completed loaded=%d root=%s", loaded, root / "capabilities")
+                LOGGER.warning(
+                    "Unable to register %s capability %s: %s", kind, script, exc
+                )
+    LOGGER.info(
+        "Instance capability discovery completed loaded=%d root=%s",
+        loaded,
+        root / "capabilities",
+    )
 
 
 def _think_reader(runner: CapabilityScriptRunner, script: Path) -> Callable[[], str]:
@@ -51,7 +59,9 @@ def _think_reader(runner: CapabilityScriptRunner, script: Path) -> Callable[[], 
     return read
 
 
-def _measure_handler(runner: CapabilityScriptRunner, script: Path) -> Callable[[str], Any]:
+def _measure_handler(
+    runner: CapabilityScriptRunner, script: Path
+) -> Callable[[str], Any]:
     def read(feature: str) -> Any:
         return runner.read_measure(script, feature)
 

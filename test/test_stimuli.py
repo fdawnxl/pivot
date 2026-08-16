@@ -6,10 +6,18 @@ from pathlib import Path
 import pytest
 
 from pivot.memory import RuntimeStore
-from pivot.stimuli import OutputEnvelope, StimulusEnvelope, StimulusError, StimulusInbox, StimulusState
+from pivot.stimuli import (
+    OutputEnvelope,
+    StimulusEnvelope,
+    StimulusError,
+    StimulusInbox,
+    StimulusState,
+)
 
 
-def _envelope(agent_id: str, *, source: str, content: str, priority: int = 50, **extra: object) -> StimulusEnvelope:
+def _envelope(
+    agent_id: str, *, source: str, content: str, priority: int = 50, **extra: object
+) -> StimulusEnvelope:
     return StimulusEnvelope.from_mapping(
         {
             "kind": "command",
@@ -22,10 +30,14 @@ def _envelope(agent_id: str, *, source: str, content: str, priority: int = 50, *
     )
 
 
-def test_stimulus_envelope_binds_target_and_rejects_adapter_specific_fields(tmp_path: Path) -> None:
+def test_stimulus_envelope_binds_target_and_rejects_adapter_specific_fields(
+    tmp_path: Path,
+) -> None:
     memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
-    envelope = _envelope(agent_id, source="instance.voice-adapter", content="look ahead")
+    envelope = _envelope(
+        agent_id, source="instance.voice-adapter", content="look ahead"
+    )
 
     assert envelope.target_agent_id == agent_id
     assert envelope.activation_content() == "look ahead"
@@ -42,7 +54,9 @@ def test_stimulus_envelope_binds_target_and_rejects_adapter_specific_fields(tmp_
     memory.close()
 
 
-def test_stimulus_inbox_is_priority_ordered_idempotent_and_persistent(tmp_path: Path) -> None:
+def test_stimulus_inbox_is_priority_ordered_idempotent_and_persistent(
+    tmp_path: Path,
+) -> None:
     memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     inbox = StimulusInbox(memory)
@@ -135,7 +149,9 @@ def test_event_occurrence_stimulus_and_edge_state_are_atomic(tmp_path: Path) -> 
     memory.close()
 
 
-def test_replay_safe_processing_stimulus_is_requeued_after_runtime_restart(tmp_path: Path) -> None:
+def test_replay_safe_processing_stimulus_is_requeued_after_runtime_restart(
+    tmp_path: Path,
+) -> None:
     memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     inbox = StimulusInbox(memory)
@@ -150,7 +166,9 @@ def test_replay_safe_processing_stimulus_is_requeued_after_runtime_restart(tmp_p
     memory.close()
 
 
-def test_unsafe_processing_stimulus_is_failed_after_runtime_restart(tmp_path: Path) -> None:
+def test_unsafe_processing_stimulus_is_failed_after_runtime_restart(
+    tmp_path: Path,
+) -> None:
     memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     inbox = StimulusInbox(memory)
@@ -190,10 +208,14 @@ def test_outputs_support_monotonic_resume_cursor(tmp_path: Path) -> None:
     inbox.enqueue(first_stimulus)
     inbox.enqueue(second_stimulus)
     first = inbox.append_output(
-        OutputEnvelope("output-1", first_stimulus.stimulus_id, agent_id, "response", {}, None)
+        OutputEnvelope(
+            "output-1", first_stimulus.stimulus_id, agent_id, "response", {}, None
+        )
     )
     second = inbox.append_output(
-        OutputEnvelope("output-2", second_stimulus.stimulus_id, agent_id, "response", {}, None)
+        OutputEnvelope(
+            "output-2", second_stimulus.stimulus_id, agent_id, "response", {}, None
+        )
     )
 
     assert first.sequence == 1

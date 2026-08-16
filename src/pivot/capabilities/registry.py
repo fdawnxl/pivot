@@ -35,20 +35,42 @@ class CapabilityScriptRunner:
         max_output_bytes: int = _MAX_OUTPUT_BYTES,
     ) -> None:
         self.environment = Path(environment).expanduser().resolve()
-        self.instance = Path(instance).expanduser().resolve() if instance else self.environment.parent.parent
+        self.instance = (
+            Path(instance).expanduser().resolve()
+            if instance
+            else self.environment.parent.parent
+        )
         self.timeout = timeout
         self.uv_binary = uv_binary
         self.max_output_bytes = max_output_bytes
         if timeout <= 0 or max_output_bytes < 1:
             raise ValueError("timeout and max_output_bytes must be positive")
 
-    def _run(self, script: str | Path, arguments: list[str], *, input_value: object | None = None) -> Any:
+    def _run(
+        self,
+        script: str | Path,
+        arguments: list[str],
+        *,
+        input_value: object | None = None,
+    ) -> Any:
         script_path = Path(script).expanduser().resolve()
         if not script_path.is_file():
             raise CapabilityError(f"Capability script does not exist: {script_path}")
-        command = [self.uv_binary, "run", "--project", str(self.environment), "python", str(script_path), *arguments]
+        command = [
+            self.uv_binary,
+            "run",
+            "--project",
+            str(self.environment),
+            "python",
+            str(script_path),
+            *arguments,
+        ]
         operation = arguments[0]
-        LOGGER.info("Capability process started script=%s operation=%s", script_path.name, operation)
+        LOGGER.info(
+            "Capability process started script=%s operation=%s",
+            script_path.name,
+            operation,
+        )
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -70,7 +92,9 @@ class CapabilityScriptRunner:
         try:
             result = subprocess.run(
                 command,
-                input=json.dumps(input_value, ensure_ascii=False) if input_value is not None else None,
+                input=json.dumps(input_value, ensure_ascii=False)
+                if input_value is not None
+                else None,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -79,11 +103,23 @@ class CapabilityScriptRunner:
                 env=environment,
             )
         except subprocess.TimeoutExpired as exc:
-            LOGGER.error("Capability process timed out script=%s timeout=%g", script_path.name, self.timeout)
-            raise CapabilityError(f"Capability timed out after {self.timeout:g} seconds") from exc
+            LOGGER.error(
+                "Capability process timed out script=%s timeout=%g",
+                script_path.name,
+                self.timeout,
+            )
+            raise CapabilityError(
+                f"Capability timed out after {self.timeout:g} seconds"
+            ) from exc
         except OSError as exc:
-            LOGGER.error("Capability process could not start script=%s error_type=%s", script_path.name, type(exc).__name__)
-            raise CapabilityError(f"Unable to start capability: {type(exc).__name__}") from exc
+            LOGGER.error(
+                "Capability process could not start script=%s error_type=%s",
+                script_path.name,
+                type(exc).__name__,
+            )
+            raise CapabilityError(
+                f"Unable to start capability: {type(exc).__name__}"
+            ) from exc
         stderr = result.stderr.strip()[-500:]
         if result.returncode != 0:
             LOGGER.error(
@@ -92,18 +128,30 @@ class CapabilityScriptRunner:
                 result.returncode,
                 stderr or "no error detail",
             )
-            raise CapabilityError(f"Capability failed with code {result.returncode}: {stderr or 'no error detail'}")
+            raise CapabilityError(
+                f"Capability failed with code {result.returncode}: {stderr or 'no error detail'}"
+            )
         encoded = result.stdout.encode("utf-8")
         if len(encoded) > self.max_output_bytes:
-            raise CapabilityError(f"Capability output exceeds {self.max_output_bytes} bytes")
+            raise CapabilityError(
+                f"Capability output exceeds {self.max_output_bytes} bytes"
+            )
         try:
             value = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
-            raise CapabilityError(f"Capability returned invalid JSON: {exc.msg}") from exc
-        LOGGER.info("Capability process completed script=%s operation=%s", script_path.name, operation)
+            raise CapabilityError(
+                f"Capability returned invalid JSON: {exc.msg}"
+            ) from exc
+        LOGGER.info(
+            "Capability process completed script=%s operation=%s",
+            script_path.name,
+            operation,
+        )
         return value
 
-    def describe(self, script: str | Path, kind: CapabilityKind) -> CapabilityDescriptor:
+    def describe(
+        self, script: str | Path, kind: CapabilityKind
+    ) -> CapabilityDescriptor:
         value = self._run(script, ["-l"])
         if not isinstance(value, Mapping):
             raise CapabilityError("Capability -l response must be a JSON object")
@@ -119,12 +167,16 @@ class CapabilityScriptRunner:
                 source=str(Path(script).expanduser().resolve()),
             )
         except (KeyError, TypeError, ValueError) as exc:
-            raise CapabilityError("Capability descriptor is missing required fields") from exc
+            raise CapabilityError(
+                "Capability descriptor is missing required fields"
+            ) from exc
 
     def read_think(self, script: str | Path) -> str:
         value = self._run(script, ["-r"])
         if not isinstance(value, str) or not value.strip():
-            raise CapabilityError("Think capability -r response must be a non-empty JSON string")
+            raise CapabilityError(
+                "Think capability -r response must be a non-empty JSON string"
+            )
         return value
 
     def read_measure(self, script: str | Path, feature: str) -> Any:
@@ -154,27 +206,51 @@ class CapabilityRegistry:
         self._handlers: dict[str, Callable[..., Any]] = {}
         self._think_readers: dict[str, Callable[[], str]] = {}
 
-    def register(self, descriptor: CapabilityDescriptor, handler: Callable[..., Any] | None = None) -> None:
+    def register(
+        self,
+        descriptor: CapabilityDescriptor,
+        handler: Callable[..., Any] | None = None,
+    ) -> None:
         if descriptor.name in self._descriptors or descriptor.name == THINK_READER_NAME:
-            raise CapabilityError(f"Capability already registered or reserved: {descriptor.name}")
+            raise CapabilityError(
+                f"Capability already registered or reserved: {descriptor.name}"
+            )
         if descriptor.kind in ("work", "measure") and handler is None:
-            raise CapabilityError(f"Executable capability requires a handler: {descriptor.name}")
+            raise CapabilityError(
+                f"Executable capability requires a handler: {descriptor.name}"
+            )
         if descriptor.kind == "think" and handler is not None:
-            raise CapabilityError("Think capabilities provide context and cannot have handlers")
+            raise CapabilityError(
+                "Think capabilities provide context and cannot have handlers"
+            )
         self._descriptors[descriptor.name] = descriptor
         if handler is not None:
             self._handlers[descriptor.name] = handler
-        LOGGER.debug("Capability registered name=%s kind=%s source=%s", descriptor.name, descriptor.kind, descriptor.source or "built-in")
+        LOGGER.debug(
+            "Capability registered name=%s kind=%s source=%s",
+            descriptor.name,
+            descriptor.kind,
+            descriptor.source or "built-in",
+        )
 
-    def register_think(self, descriptor: CapabilityDescriptor, reader: Callable[[], str]) -> None:
+    def register_think(
+        self, descriptor: CapabilityDescriptor, reader: Callable[[], str]
+    ) -> None:
         if descriptor.kind != "think":
             raise CapabilityError("Lazy think reader requires a think descriptor")
         self.register(descriptor)
         self._think_readers[descriptor.name] = reader
 
-    def descriptors(self, kind: CapabilityKind | None = None) -> tuple[CapabilityDescriptor, ...]:
+    def descriptors(
+        self, kind: CapabilityKind | None = None
+    ) -> tuple[CapabilityDescriptor, ...]:
         items = self._descriptors.values()
-        return tuple(sorted((item for item in items if kind is None or item.kind == kind), key=lambda item: item.name))
+        return tuple(
+            sorted(
+                (item for item in items if kind is None or item.kind == kind),
+                key=lambda item: item.name,
+            )
+        )
 
     def llm_tools(self) -> tuple[dict[str, Any], ...]:
         tools = [
@@ -183,7 +259,8 @@ class CapabilityRegistry:
                 "function": {
                     "name": item.name,
                     "description": item.description,
-                    "parameters": item.parameters or {"type": "object", "properties": {}},
+                    "parameters": item.parameters
+                    or {"type": "object", "properties": {}},
                 },
             }
             for item in self.descriptors()
@@ -198,7 +275,12 @@ class CapabilityRegistry:
                         "description": "Read the full text of one optional think capability before applying it.",
                         "parameters": {
                             "type": "object",
-                            "properties": {"name": {"type": "string", "enum": sorted(self._think_readers)}},
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "enum": sorted(self._think_readers),
+                                }
+                            },
                             "required": ["name"],
                             "additionalProperties": False,
                         },
@@ -209,7 +291,10 @@ class CapabilityRegistry:
 
     def prompt_context(self) -> list[dict[str, Any]]:
         return [
-            {**item.as_prompt_dict(), **({"lazy": True} if item.kind == "think" else {})}
+            {
+                **item.as_prompt_dict(),
+                **({"lazy": True} if item.kind == "think" else {}),
+            }
             for item in self.descriptors()
         ]
 
@@ -219,7 +304,9 @@ class CapabilityRegistry:
         requested = tuple(dict.fromkeys(names))
         unknown = sorted(set(requested) - self._descriptors.keys())
         if unknown:
-            raise CapabilityError(f"Unknown assigned capabilities: {', '.join(unknown)}")
+            raise CapabilityError(
+                f"Unknown assigned capabilities: {', '.join(unknown)}"
+            )
         scoped = CapabilityRegistry()
         for name in requested:
             descriptor = self._descriptors[name]
@@ -242,20 +329,43 @@ class CapabilityRegistry:
         try:
             inspect.signature(handler).bind(**call.arguments)
         except TypeError as exc:
-            raise CapabilityError(f"Invalid arguments for capability {call.name}: {exc}") from exc
-        LOGGER.info("Executing %s capability '%s'", descriptor.kind, descriptor.name, extra={"capability": descriptor.name})
+            raise CapabilityError(
+                f"Invalid arguments for capability {call.name}: {exc}"
+            ) from exc
+        LOGGER.info(
+            "Executing %s capability '%s'",
+            descriptor.kind,
+            descriptor.name,
+            extra={"capability": descriptor.name},
+        )
         try:
             result = handler(**call.arguments)
             json.dumps(result, ensure_ascii=False)
         except CapabilityError:
-            LOGGER.warning("Capability failed name=%s kind=%s", descriptor.name, descriptor.kind)
+            LOGGER.warning(
+                "Capability failed name=%s kind=%s", descriptor.name, descriptor.kind
+            )
             raise
         except (TypeError, ValueError) as exc:
-            raise CapabilityError(f"Capability {call.name} returned a non-JSON result") from exc
+            raise CapabilityError(
+                f"Capability {call.name} returned a non-JSON result"
+            ) from exc
         except Exception as exc:
-            LOGGER.error("Capability raised name=%s kind=%s error_type=%s", descriptor.name, descriptor.kind, type(exc).__name__)
-            raise CapabilityError(f"Capability {call.name} failed: {type(exc).__name__}: {exc}") from exc
-        LOGGER.info("Capability completed name=%s kind=%s", descriptor.name, descriptor.kind, extra={"capability": descriptor.name})
+            LOGGER.error(
+                "Capability raised name=%s kind=%s error_type=%s",
+                descriptor.name,
+                descriptor.kind,
+                type(exc).__name__,
+            )
+            raise CapabilityError(
+                f"Capability {call.name} failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        LOGGER.info(
+            "Capability completed name=%s kind=%s",
+            descriptor.name,
+            descriptor.kind,
+            extra={"capability": descriptor.name},
+        )
         return result
 
     def _read_think(self, arguments: Mapping[str, Any]) -> dict[str, str]:
@@ -267,8 +377,16 @@ class CapabilityRegistry:
         except CapabilityError:
             raise
         except Exception as exc:
-            raise CapabilityError(f"Unable to read think capability {name}: {type(exc).__name__}") from exc
+            raise CapabilityError(
+                f"Unable to read think capability {name}: {type(exc).__name__}"
+            ) from exc
         return {"name": name, "content": content}
 
 
-__all__ = ["CapabilityError", "CapabilityRegistry", "CapabilityScriptRunner", "MeasureRunner", "THINK_READER_NAME"]
+__all__ = [
+    "CapabilityError",
+    "CapabilityRegistry",
+    "CapabilityScriptRunner",
+    "MeasureRunner",
+    "THINK_READER_NAME",
+]

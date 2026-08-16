@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import subprocess
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -37,7 +37,7 @@ def _write_project(
         f'id = "{dependency_id}"\n'
         'description = "Test sensor server"\n'
         'command = ["python", "server.py"]\n'
-        '[dbus]\n'
+        "[dbus]\n"
         'bus = "session"\n'
         f'service = "{service}"\n',
         encoding="utf-8",
@@ -45,7 +45,9 @@ def _write_project(
     return root
 
 
-def test_dependency_manifest_requires_uv_project_and_valid_meaningful_id(tmp_path: Path) -> None:
+def test_dependency_manifest_requires_uv_project_and_valid_meaningful_id(
+    tmp_path: Path,
+) -> None:
     project = _write_project(tmp_path / "sensor")
     descriptor = load_dependency_manifest(project)
 
@@ -54,7 +56,9 @@ def test_dependency_manifest_requires_uv_project_and_valid_meaningful_id(tmp_pat
     assert descriptor.command == ("python", "server.py")
     assert descriptor.root == project.resolve()
 
-    (project / "dependency.toml").write_text('id = "Sensor"\ncommand = ["python"]\n', encoding="utf-8")
+    (project / "dependency.toml").write_text(
+        'id = "Sensor"\ncommand = ["python"]\n', encoding="utf-8"
+    )
     with pytest.raises(DependencyError, match="Invalid dependency id"):
         load_dependency_manifest(project)
 
@@ -70,12 +74,16 @@ def test_dependency_discovery_is_first_level_and_skips_invalid_or_duplicate_proj
     _write_project(root / "service-two", "service-two", "org.pivot.Conflict")
     invalid = root / "invalid"
     invalid.mkdir(parents=True)
-    (invalid / "dependency.toml").write_text('id = "invalid"\ncommand = "python server.py"\n', encoding="utf-8")
+    (invalid / "dependency.toml").write_text(
+        'id = "invalid"\ncommand = "python server.py"\n', encoding="utf-8"
+    )
     _write_project(first / "nested", "nested", "org.pivot.Nested")
 
     descriptors = discover_dependencies(root)
 
-    assert [(item.dependency_id, item.root) for item in descriptors] == [("valid", valid.resolve())]
+    assert [(item.dependency_id, item.root) for item in descriptors] == [
+        ("valid", valid.resolve())
+    ]
     assert "Skipping duplicate instance dependency" in caplog.text
     assert "Skipping duplicate dependency D-Bus service" in caplog.text
     assert "Skipping instance dependency" in caplog.text
@@ -88,7 +96,9 @@ class FakeStatusClient:
 
     def query(self, descriptor, *, timeout: float) -> DependencyStatus:
         self.queries.append((descriptor.dbus.service, timeout))
-        return DependencyStatus(descriptor.dependency_id, DependencyState.READY, "available", {"samples": 1})
+        return DependencyStatus(
+            descriptor.dependency_id, DependencyState.READY, "available", {"samples": 1}
+        )
 
     def ping(self, descriptor, *, timeout: float) -> bool:
         self.pings.append((descriptor.dbus.service, timeout))
@@ -117,7 +127,9 @@ class FakeProcess:
         return self.returncode
 
 
-def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(tmp_path: Path) -> None:
+def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(
+    tmp_path: Path,
+) -> None:
     instance = tmp_path / "instance"
     project = _write_project(instance / "dependencies" / "sensor")
     sync_calls: list[tuple[list[str], dict[str, Any]]] = []
@@ -144,9 +156,15 @@ def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(tmp_path
     )
 
     first = manager.start_all()
-    assert first == (DependencyStatus("sensor-server", DependencyState.READY, "available", {"samples": 1}),)
+    assert first == (
+        DependencyStatus(
+            "sensor-server", DependencyState.READY, "available", {"samples": 1}
+        ),
+    )
     assert sync_calls[0][0] == ["uv", "sync", "--project", str(project.resolve())]
-    assert (project / DEPENDENCY_READY_MARKER).read_text(encoding="utf-8") == "sensor-server\n"
+    assert (project / DEPENDENCY_READY_MARKER).read_text(
+        encoding="utf-8"
+    ) == "sensor-server\n"
     assert launch_calls[0][0] == [
         "uv",
         "run",
@@ -159,7 +177,10 @@ def test_manager_syncs_only_once_runs_without_sync_and_uses_dbus_status(tmp_path
     assert launch_calls[0][1]["cwd"] == project.resolve()
     assert launch_calls[0][1]["env"]["PIVOT_DEPENDENCY_ID"] == "sensor-server"
     assert launch_calls[0][1]["env"]["PIVOT_DEPENDENCY_DBUS_BUS"] == "session"
-    assert launch_calls[0][1]["env"]["PIVOT_DEPENDENCY_DBUS_SERVICE"] == "org.pivot.SensorServer"
+    assert (
+        launch_calls[0][1]["env"]["PIVOT_DEPENDENCY_DBUS_SERVICE"]
+        == "org.pivot.SensorServer"
+    )
     assert status_client.pings == [("org.pivot.SensorServer", 0.25)]
     assert status_client.queries == [("org.pivot.SensorServer", 0.25)]
     assert manager.statuses() == first
@@ -212,7 +233,9 @@ def test_failed_sync_does_not_create_first_run_marker_or_launch(tmp_path: Path) 
 def test_start_all_isolates_one_dependency_installation_failure(tmp_path: Path) -> None:
     instance = tmp_path / "instance"
     _write_project(instance / "dependencies" / "broken", "broken", "org.pivot.Broken")
-    _write_project(instance / "dependencies" / "healthy", "healthy", "org.pivot.Healthy")
+    _write_project(
+        instance / "dependencies" / "healthy", "healthy", "org.pivot.Healthy"
+    )
     launched: list[str] = []
 
     def runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -250,7 +273,9 @@ def test_status_payload_rejects_mismatched_id_and_invalid_state() -> None:
         DependencyStatus.from_payload("sensor", {"id": "sensor", "state": "unknown"})
 
 
-@pytest.mark.skipif(shutil.which("dbus-daemon") is None, reason="dbus-daemon is unavailable")
+@pytest.mark.skipif(
+    shutil.which("dbus-daemon") is None, reason="dbus-daemon is unavailable"
+)
 def test_common_dbus_client_queries_status_and_heartbeat(tmp_path: Path) -> None:
     bus_process = subprocess.Popen(
         ["dbus-daemon", "--session", "--nofork", "--print-address=1"],

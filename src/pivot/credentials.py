@@ -53,11 +53,19 @@ class CredentialStore:
                 raise CredentialError("Each provider must be a named TOML table")
             model = raw.get("model")
             if not isinstance(model, str) or not model.strip():
-                raise CredentialError(f"Provider {name!r} must define a non-empty model")
+                raise CredentialError(
+                    f"Provider {name!r} must define a non-empty model"
+                )
             api_base = _optional_string(raw, "api_base", provider=name)
             api_key = _optional_string(raw, "api_key", provider=name)
-            providers[name] = ProviderCredential(name=name, model=model, api_base=api_base, api_key=api_key)
-        LOGGER.debug("Provider credentials loaded path=%s providers=%s", self.path, sorted(providers))
+            providers[name] = ProviderCredential(
+                name=name, model=model, api_base=api_base, api_key=api_key
+            )
+        LOGGER.debug(
+            "Provider credentials loaded path=%s providers=%s",
+            self.path,
+            sorted(providers),
+        )
         return providers
 
     def save(self, providers: Mapping[str, ProviderCredential]) -> None:
@@ -66,7 +74,9 @@ class CredentialStore:
         try:
             import tomli_w
         except ImportError as exc:  # pragma: no cover - declared runtime dependency
-            raise CredentialError("tomli-w is required to save provider credentials") from exc
+            raise CredentialError(
+                "tomli-w is required to save provider credentials"
+            ) from exc
         document = {
             "providers": {
                 name: {
@@ -82,7 +92,9 @@ class CredentialStore:
             }
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", dir=self.path.parent
+        )
         temporary = Path(temporary_name)
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -91,18 +103,26 @@ class CredentialStore:
                 os.fsync(handle.fileno())
             os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
             os.replace(temporary, self.path)
-            LOGGER.info("Provider credentials saved path=%s providers=%s", self.path, sorted(providers))
+            LOGGER.info(
+                "Provider credentials saved path=%s providers=%s",
+                self.path,
+                sorted(providers),
+            )
         except OSError as exc:
             temporary.unlink(missing_ok=True)
             raise CredentialError(f"Cannot save credentials file {self.path}") from exc
 
 
-def _optional_string(source: Mapping[str, Any], key: str, *, provider: str) -> str | None:
+def _optional_string(
+    source: Mapping[str, Any], key: str, *, provider: str
+) -> str | None:
     value = source.get(key)
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise CredentialError(f"Provider {provider!r} field {key!r} must be a non-empty string")
+        raise CredentialError(
+            f"Provider {provider!r} field {key!r} must be a non-empty string"
+        )
     return value
 
 

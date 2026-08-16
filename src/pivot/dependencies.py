@@ -85,11 +85,15 @@ class DependencyStatus:
     details: Mapping[str, Any] | None = None
 
     @classmethod
-    def from_payload(cls, dependency_id: str, payload: Mapping[str, Any]) -> "DependencyStatus":
+    def from_payload(
+        cls, dependency_id: str, payload: Mapping[str, Any]
+    ) -> "DependencyStatus":
         reported_id = payload.get("id")
         state = payload.get("state")
         if reported_id != dependency_id:
-            raise DependencyError(f"Dependency {dependency_id!r} reported a different id")
+            raise DependencyError(
+                f"Dependency {dependency_id!r} reported a different id"
+            )
         if state not in {
             DependencyState.STARTING,
             DependencyState.READY,
@@ -97,18 +101,31 @@ class DependencyStatus:
             DependencyState.STOPPING,
             DependencyState.ERROR,
         }:
-            raise DependencyError(f"Dependency {dependency_id!r} reported an invalid state")
+            raise DependencyError(
+                f"Dependency {dependency_id!r} reported an invalid state"
+            )
         message = payload.get("message", "")
         details = payload.get("details")
-        if not isinstance(message, str) or (details is not None and not isinstance(details, Mapping)):
-            raise DependencyError(f"Dependency {dependency_id!r} reported an invalid status payload")
-        return cls(dependency_id, DependencyState(state), message, dict(details) if details is not None else None)
+        if not isinstance(message, str) or (
+            details is not None and not isinstance(details, Mapping)
+        ):
+            raise DependencyError(
+                f"Dependency {dependency_id!r} reported an invalid status payload"
+            )
+        return cls(
+            dependency_id,
+            DependencyState(state),
+            message,
+            dict(details) if details is not None else None,
+        )
 
 
 class DependencyStatusClient(Protocol):
     """Transport boundary used by the manager to inspect dependencies."""
 
-    def query(self, descriptor: DependencyDescriptor, *, timeout: float) -> DependencyStatus:
+    def query(
+        self, descriptor: DependencyDescriptor, *, timeout: float
+    ) -> DependencyStatus:
         """Read and validate one dependency status."""
 
     def ping(self, descriptor: DependencyDescriptor, *, timeout: float) -> bool:
@@ -121,17 +138,25 @@ class DBusDependencyStatusClient:
     def __init__(self, *, bus_addresses: Mapping[str, str] | None = None) -> None:
         self.bus_addresses = dict(bus_addresses or {})
 
-    def query(self, descriptor: DependencyDescriptor, *, timeout: float) -> DependencyStatus:
+    def query(
+        self, descriptor: DependencyDescriptor, *, timeout: float
+    ) -> DependencyStatus:
         dependency_id = descriptor.dependency_id
         reply = self._call(descriptor, "GetStatus", timeout=timeout)
         if len(reply) != 1 or not isinstance(reply[0], str):
-            raise DependencyError(f"Dependency {dependency_id!r} returned an invalid GetStatus response")
+            raise DependencyError(
+                f"Dependency {dependency_id!r} returned an invalid GetStatus response"
+            )
         try:
             payload = json.loads(reply[0])
         except json.JSONDecodeError as exc:
-            raise DependencyError(f"Dependency {dependency_id!r} returned invalid status JSON") from exc
+            raise DependencyError(
+                f"Dependency {dependency_id!r} returned invalid status JSON"
+            ) from exc
         if not isinstance(payload, Mapping):
-            raise DependencyError(f"Dependency {dependency_id!r} status must be a JSON object")
+            raise DependencyError(
+                f"Dependency {dependency_id!r} status must be a JSON object"
+            )
         return DependencyStatus.from_payload(dependency_id, payload)
 
     def ping(self, descriptor: DependencyDescriptor, *, timeout: float) -> bool:
@@ -141,7 +166,9 @@ class DBusDependencyStatusClient:
             return False
         return len(reply) == 1 and reply[0] in {descriptor.dependency_id, "pong"}
 
-    def _call(self, descriptor: DependencyDescriptor, member: str, *, timeout: float) -> list[Any]:
+    def _call(
+        self, descriptor: DependencyDescriptor, member: str, *, timeout: float
+    ) -> list[Any]:
         dependency_id = descriptor.dependency_id
         _validate_dependency_id(dependency_id)
 
@@ -150,11 +177,19 @@ class DBusDependencyStatusClient:
                 from dbus_next import BusType, Message, MessageType
                 from dbus_next.aio import MessageBus
             except ImportError as exc:  # pragma: no cover - declared runtime dependency
-                raise DependencyError("dbus-next is required for dependency status queries") from exc
-            bus_type = BusType.SESSION if descriptor.dbus.bus == "session" else BusType.SYSTEM
+                raise DependencyError(
+                    "dbus-next is required for dependency status queries"
+                ) from exc
+            bus_type = (
+                BusType.SESSION if descriptor.dbus.bus == "session" else BusType.SYSTEM
+            )
             try:
                 bus_address = self.bus_addresses.get(descriptor.dbus.bus)
-                message_bus = MessageBus(bus_address=bus_address) if bus_address else MessageBus(bus_type=bus_type)
+                message_bus = (
+                    MessageBus(bus_address=bus_address)
+                    if bus_address
+                    else MessageBus(bus_type=bus_type)
+                )
                 connection = await message_bus.connect()
                 try:
                     reply = await connection.call(
@@ -172,8 +207,14 @@ class DBusDependencyStatusClient:
                     f"D-Bus {member} failed for dependency {dependency_id!r}: {type(exc).__name__}"
                 ) from exc
             if reply.message_type == MessageType.ERROR:
-                detail = str(reply.body[0]) if reply.body else reply.error_name or "D-Bus error"
-                raise DependencyError(f"Dependency {dependency_id!r} rejected {member}: {detail}")
+                detail = (
+                    str(reply.body[0])
+                    if reply.body
+                    else reply.error_name or "D-Bus error"
+                )
+                raise DependencyError(
+                    f"Dependency {dependency_id!r} rejected {member}: {detail}"
+                )
             return list(reply.body)
 
         try:
@@ -211,7 +252,9 @@ def _run_async(awaitable: Any) -> Any:
 
 
 def _validate_dependency_id(dependency_id: str) -> None:
-    if not isinstance(dependency_id, str) or not _DEPENDENCY_ID.fullmatch(dependency_id):
+    if not isinstance(dependency_id, str) or not _DEPENDENCY_ID.fullmatch(
+        dependency_id
+    ):
         raise DependencyError(f"Invalid dependency id: {dependency_id!r}")
 
 
@@ -221,9 +264,13 @@ def _load_dbus(value: object, *, dependency_id: str) -> DependencyDBus:
     bus = value.get("bus")
     service = value.get("service")
     if bus not in {"session", "system"}:
-        raise DependencyError(f"Dependency {dependency_id!r} dbus.bus must be 'session' or 'system'")
+        raise DependencyError(
+            f"Dependency {dependency_id!r} dbus.bus must be 'session' or 'system'"
+        )
     if not isinstance(service, str) or not _DBUS_SERVICE.fullmatch(service):
-        raise DependencyError(f"Dependency {dependency_id!r} has an invalid D-Bus service name")
+        raise DependencyError(
+            f"Dependency {dependency_id!r} has an invalid D-Bus service name"
+        )
     return DependencyDBus(bus, service)
 
 
@@ -235,7 +282,9 @@ def load_dependency_manifest(root: str | Path) -> DependencyDescriptor:
     if not manifest.is_file():
         raise DependencyError(f"Dependency manifest is missing: {manifest}")
     if not (project_root / "pyproject.toml").is_file():
-        raise DependencyError(f"Dependency project has no pyproject.toml: {project_root}")
+        raise DependencyError(
+            f"Dependency project has no pyproject.toml: {project_root}"
+        )
     try:
         with manifest.open("rb") as handle:
             value: Any = tomllib.load(handle)
@@ -251,12 +300,20 @@ def load_dependency_manifest(root: str | Path) -> DependencyDescriptor:
     if (
         not isinstance(command, list)
         or not command
-        or not all(isinstance(item, str) and item and "\x00" not in item for item in command)
+        or not all(
+            isinstance(item, str) and item and "\x00" not in item for item in command
+        )
     ):
-        raise DependencyError(f"Dependency {dependency_id!r} command must be a non-empty string array")
+        raise DependencyError(
+            f"Dependency {dependency_id!r} command must be a non-empty string array"
+        )
     if not isinstance(description, str):
-        raise DependencyError(f"Dependency {dependency_id!r} description must be a string")
-    return DependencyDescriptor(dependency_id, project_root, tuple(command), dbus, description)
+        raise DependencyError(
+            f"Dependency {dependency_id!r} description must be a string"
+        )
+    return DependencyDescriptor(
+        dependency_id, project_root, tuple(command), dbus, description
+    )
 
 
 def discover_dependencies(root: str | Path) -> tuple[DependencyDescriptor, ...]:
@@ -267,28 +324,46 @@ def discover_dependencies(root: str | Path) -> tuple[DependencyDescriptor, ...]:
         return ()
     discovered: list[DependencyDescriptor] = []
     try:
-        candidates = sorted((item for item in dependencies_root.iterdir() if item.is_dir()), key=lambda item: item.name)
+        candidates = sorted(
+            (item for item in dependencies_root.iterdir() if item.is_dir()),
+            key=lambda item: item.name,
+        )
     except OSError as exc:
-        LOGGER.warning("Unable to scan dependency root path=%s error_type=%s", dependencies_root, type(exc).__name__)
+        LOGGER.warning(
+            "Unable to scan dependency root path=%s error_type=%s",
+            dependencies_root,
+            type(exc).__name__,
+        )
         return ()
     for project in candidates:
         try:
             project.resolve().relative_to(dependencies_root)
             discovered.append(load_dependency_manifest(project))
         except (DependencyError, ValueError) as exc:
-            LOGGER.warning("Skipping instance dependency directory=%s error=%s", project.name, exc)
+            LOGGER.warning(
+                "Skipping instance dependency directory=%s error=%s", project.name, exc
+            )
     counts = Counter(item.dependency_id for item in discovered)
-    duplicates = sorted(dependency_id for dependency_id, count in counts.items() if count > 1)
+    duplicates = sorted(
+        dependency_id for dependency_id, count in counts.items() if count > 1
+    )
     for dependency_id in duplicates:
         LOGGER.warning("Skipping duplicate instance dependency id=%s", dependency_id)
     endpoints = Counter((item.dbus.bus, item.dbus.service) for item in discovered)
-    duplicate_endpoints = sorted(endpoint for endpoint, count in endpoints.items() if count > 1)
+    duplicate_endpoints = sorted(
+        endpoint for endpoint, count in endpoints.items() if count > 1
+    )
     for bus, service in duplicate_endpoints:
-        LOGGER.warning("Skipping duplicate dependency D-Bus service bus=%s service=%s", bus, service)
+        LOGGER.warning(
+            "Skipping duplicate dependency D-Bus service bus=%s service=%s",
+            bus,
+            service,
+        )
     return tuple(
         item
         for item in discovered
-        if counts[item.dependency_id] == 1 and endpoints[(item.dbus.bus, item.dbus.service)] == 1
+        if counts[item.dependency_id] == 1
+        and endpoints[(item.dbus.bus, item.dbus.service)] == 1
     )
 
 
@@ -318,8 +393,19 @@ class DependencyManager:
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if min(install_timeout, start_timeout, dbus_timeout, stop_timeout, poll_interval) <= 0:
-            raise ValueError("Dependency timeouts and poll interval must be greater than zero")
+        if (
+            min(
+                install_timeout,
+                start_timeout,
+                dbus_timeout,
+                stop_timeout,
+                poll_interval,
+            )
+            <= 0
+        ):
+            raise ValueError(
+                "Dependency timeouts and poll interval must be greater than zero"
+            )
         self.instance = Path(instance).expanduser().resolve()
         self.root = self.instance / "dependencies"
         self.status_client = status_client or DBusDependencyStatusClient()
@@ -348,14 +434,20 @@ class DependencyManager:
             for descriptor in descriptors:
                 self._statuses.setdefault(
                     descriptor.dependency_id,
-                    DependencyStatus(descriptor.dependency_id, DependencyState.STOPPED, "Not started"),
+                    DependencyStatus(
+                        descriptor.dependency_id, DependencyState.STOPPED, "Not started"
+                    ),
                 )
             self._statuses = {
                 dependency_id: status
                 for dependency_id, status in self._statuses.items()
                 if dependency_id in self._descriptors
             }
-        LOGGER.info("Instance dependency discovery completed loaded=%d root=%s", len(descriptors), self.root)
+        LOGGER.info(
+            "Instance dependency discovery completed loaded=%d root=%s",
+            len(descriptors),
+            self.root,
+        )
         return descriptors
 
     def start_all(self) -> tuple[DependencyStatus, ...]:
@@ -366,8 +458,14 @@ class DependencyManager:
             try:
                 statuses.append(self.start(descriptor.dependency_id))
             except DependencyError as exc:
-                self._set_status(descriptor.dependency_id, DependencyState.ERROR, str(exc))
-                LOGGER.warning("Unable to start dependency id=%s error=%s", descriptor.dependency_id, exc)
+                self._set_status(
+                    descriptor.dependency_id, DependencyState.ERROR, str(exc)
+                )
+                LOGGER.warning(
+                    "Unable to start dependency id=%s error=%s",
+                    descriptor.dependency_id,
+                    exc,
+                )
         return tuple(statuses)
 
     def start(self, dependency_id: str) -> DependencyStatus:
@@ -405,7 +503,9 @@ class DependencyManager:
         try:
             log_handle = log_path.open("ab", buffering=0)
         except OSError as exc:
-            raise DependencyError(f"Cannot open dependency log for {dependency_id!r}") from exc
+            raise DependencyError(
+                f"Cannot open dependency log for {dependency_id!r}"
+            ) from exc
         command = [
             self.uv_binary,
             "run",
@@ -426,10 +526,16 @@ class DependencyManager:
             )
         except OSError as exc:
             log_handle.close()
-            raise DependencyError(f"Unable to launch dependency {dependency_id!r}: {type(exc).__name__}") from exc
+            raise DependencyError(
+                f"Unable to launch dependency {dependency_id!r}: {type(exc).__name__}"
+            ) from exc
         with self._lock:
-            self._running[dependency_id] = _RunningDependency(descriptor, process, log_handle)
-        LOGGER.info("Dependency process started id=%s pid=%s", dependency_id, process.pid)
+            self._running[dependency_id] = _RunningDependency(
+                descriptor, process, log_handle
+            )
+        LOGGER.info(
+            "Dependency process started id=%s pid=%s", dependency_id, process.pid
+        )
         try:
             return self._wait_until_ready(dependency_id, process)
         except BaseException:
@@ -469,7 +575,9 @@ class DependencyManager:
         LOGGER.info("Dependency installation completed id=%s", descriptor.dependency_id)
 
     def _environment(self, dependency_id: str) -> dict[str, str]:
-        environment = {key: value for key, value in os.environ.items() if key in _ENVIRONMENT_KEYS}
+        environment = {
+            key: value for key, value in os.environ.items() if key in _ENVIRONMENT_KEYS
+        }
         environment["PIVOT_INSTANCE_PATH"] = str(self.instance)
         environment["PIVOT_DEPENDENCY_ID"] = dependency_id
         descriptor = self._descriptors[dependency_id]
@@ -485,33 +593,55 @@ class DependencyManager:
         while self.clock() < deadline:
             return_code = process.poll()
             if return_code is not None:
-                raise DependencyError(f"Dependency {dependency_id!r} exited during startup with code {return_code}")
+                raise DependencyError(
+                    f"Dependency {dependency_id!r} exited during startup with code {return_code}"
+                )
             try:
                 if self.heartbeat(dependency_id):
                     status = self.query_status(dependency_id)
-                    if status.state in {DependencyState.READY, DependencyState.DEGRADED}:
-                        self._set_status(status.dependency_id, status.state, status.message, status.details)
-                        LOGGER.info("Dependency became available id=%s state=%s", dependency_id, status.state)
+                    if status.state in {
+                        DependencyState.READY,
+                        DependencyState.DEGRADED,
+                    }:
+                        self._set_status(
+                            status.dependency_id,
+                            status.state,
+                            status.message,
+                            status.details,
+                        )
+                        LOGGER.info(
+                            "Dependency became available id=%s state=%s",
+                            dependency_id,
+                            status.state,
+                        )
                         return status
                     if status.state == DependencyState.ERROR:
-                        raise DependencyError(f"Dependency {dependency_id!r} reported an error: {status.message}")
+                        raise DependencyError(
+                            f"Dependency {dependency_id!r} reported an error: {status.message}"
+                        )
             except DependencyError as exc:
                 last_error = str(exc)
             self.sleeper(self.poll_interval)
-        raise DependencyError(f"Dependency {dependency_id!r} did not become ready: {last_error}")
+        raise DependencyError(
+            f"Dependency {dependency_id!r} did not become ready: {last_error}"
+        )
 
     def query_status(self, dependency_id: str) -> DependencyStatus:
         """Query any dependency by its meaningful id through D-Bus."""
 
         descriptor = self._descriptor(dependency_id)
         status = self.status_client.query(descriptor, timeout=self.dbus_timeout)
-        self._set_status(status.dependency_id, status.state, status.message, status.details)
+        self._set_status(
+            status.dependency_id, status.state, status.message, status.details
+        )
         return status
 
     def heartbeat(self, dependency_id: str) -> bool:
         """Check whether a dependency responds to the common D-Bus heartbeat."""
 
-        return self.status_client.ping(self._descriptor(dependency_id), timeout=self.dbus_timeout)
+        return self.status_client.ping(
+            self._descriptor(dependency_id), timeout=self.dbus_timeout
+        )
 
     def stop(self, dependency_id: str) -> bool:
         """Stop one process launched by this manager."""
@@ -521,7 +651,9 @@ class DependencyManager:
                 running = self._running.pop(dependency_id, None)
             if running is None:
                 return False
-            self._set_status(dependency_id, DependencyState.STOPPING, "Stopping dependency")
+            self._set_status(
+                dependency_id, DependencyState.STOPPING, "Stopping dependency"
+            )
             process = running.process
             try:
                 if process.poll() is None:
@@ -529,12 +661,18 @@ class DependencyManager:
                     try:
                         process.wait(timeout=self.stop_timeout)
                     except subprocess.TimeoutExpired:
-                        LOGGER.warning("Dependency did not stop gracefully id=%s", dependency_id)
+                        LOGGER.warning(
+                            "Dependency did not stop gracefully id=%s", dependency_id
+                        )
                         process.kill()
                         process.wait(timeout=self.stop_timeout)
             finally:
                 running.log_handle.close()
-            LOGGER.info("Dependency process stopped id=%s return_code=%s", dependency_id, process.returncode)
+            LOGGER.info(
+                "Dependency process stopped id=%s return_code=%s",
+                dependency_id,
+                process.returncode,
+            )
             self._set_status(dependency_id, DependencyState.STOPPED, "Stopped")
             return True
 
@@ -547,7 +685,11 @@ class DependencyManager:
             try:
                 self.stop(dependency_id)
             except (DependencyError, OSError, subprocess.SubprocessError) as exc:
-                LOGGER.warning("Unable to stop dependency id=%s error_type=%s", dependency_id, type(exc).__name__)
+                LOGGER.warning(
+                    "Unable to stop dependency id=%s error_type=%s",
+                    dependency_id,
+                    type(exc).__name__,
+                )
 
     def descriptors(self) -> tuple[DependencyDescriptor, ...]:
         with self._lock:
@@ -557,7 +699,9 @@ class DependencyManager:
         """Return manager-owned lifecycle snapshots in stable dependency order."""
 
         if refresh:
-            for dependency_id in tuple(item.dependency_id for item in self.descriptors()):
+            for dependency_id in tuple(
+                item.dependency_id for item in self.descriptors()
+            ):
                 with self._lock:
                     running = self._running.get(dependency_id)
                 if running is None:
@@ -612,7 +756,9 @@ def _write_marker(path: Path, dependency_id: str) -> None:
         os.replace(temporary, path)
     except OSError as exc:
         temporary.unlink(missing_ok=True)
-        raise DependencyError(f"Cannot write dependency installation marker: {path}") from exc
+        raise DependencyError(
+            f"Cannot write dependency installation marker: {path}"
+        ) from exc
 
 
 __all__ = [

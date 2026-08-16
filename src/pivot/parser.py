@@ -31,7 +31,9 @@ def _arguments(value: Any, *, name: str) -> dict[str, Any]:
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError as exc:
-            raise ResponseParseError(f"Invalid JSON arguments for capability {name!r}: {exc.msg}") from exc
+            raise ResponseParseError(
+                f"Invalid JSON arguments for capability {name!r}: {exc.msg}"
+            ) from exc
         if isinstance(parsed, Mapping):
             return dict(parsed)
     raise ResponseParseError(f"Arguments for capability {name!r} must be a JSON object")
@@ -52,7 +54,11 @@ def parse_response(response: Any) -> ParsedResponse:
     elif isinstance(content, str):
         text = content
     elif isinstance(content, list):
-        text = "".join(str(_value(part, "text", "")) for part in content if _value(part, "type", "text") == "text")
+        text = "".join(
+            str(_value(part, "text", ""))
+            for part in content
+            if _value(part, "type", "text") == "text"
+        )
     else:
         text = str(content)
 
@@ -69,10 +75,24 @@ def parse_response(response: Any) -> ParsedResponse:
                 call_id=_value(raw_call, "id"),
             )
         )
-    normalized_source = content if isinstance(content, (str, list, tuple)) else ("" if content is None else str(content))
+    normalized_source = (
+        content
+        if isinstance(content, (str, list, tuple))
+        else ("" if content is None else str(content))
+    )
     try:
         normalized_content: MessageContent = normalize_content(normalized_source)
     except (TypeError, ValueError) as exc:
         raise ResponseParseError(f"LLM response content is invalid: {exc}") from exc
-    LOGGER.debug("LLM response parsed text_length=%d tool_calls=%d multimodal=%s", len(text), len(parsed_calls), isinstance(normalized_content, tuple))
-    return ParsedResponse(text=text, content=normalized_content, tool_calls=tuple(parsed_calls), raw=response)
+    LOGGER.debug(
+        "LLM response parsed text_length=%d tool_calls=%d multimodal=%s",
+        len(text),
+        len(parsed_calls),
+        isinstance(normalized_content, tuple),
+    )
+    return ParsedResponse(
+        text=text,
+        content=normalized_content,
+        tool_calls=tuple(parsed_calls),
+        raw=response,
+    )

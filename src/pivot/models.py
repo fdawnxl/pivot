@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 CapabilityKind = Literal["think", "measure", "work"]
@@ -47,7 +47,9 @@ class Message:
     def as_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {"role": self.role}
         if self.content is not None:
-            value["content"] = list(self.content) if isinstance(self.content, tuple) else self.content
+            value["content"] = (
+                list(self.content) if isinstance(self.content, tuple) else self.content
+            )
         if self.name is not None:
             value["name"] = self.name
         if self.tool_calls:
@@ -67,7 +69,10 @@ class ToolCall:
 
     def as_dict(self) -> dict[str, Any]:
         # OpenAI-compatible APIs represent function arguments as a JSON string.
-        function: dict[str, Any] = {"name": self.name, "arguments": json.dumps(self.arguments, ensure_ascii=False)}
+        function: dict[str, Any] = {
+            "name": self.name,
+            "arguments": json.dumps(self.arguments, ensure_ascii=False),
+        }
         return {"id": self.call_id, "type": "function", "function": function}
 
 
@@ -92,7 +97,12 @@ class CapabilityDescriptor:
     source: str | None = None
 
     def as_prompt_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "kind": self.kind, "description": self.description, "parameters": self.parameters}
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +114,9 @@ class EventDescriptor:
     field: str
     operators: tuple[str, ...]
     templates: dict[str, str] = field(default_factory=dict)
-    timeout_template: str = "Waiting for {condition} timed out after {timeout:g} seconds."
+    timeout_template: str = (
+        "Waiting for {condition} timed out after {timeout:g} seconds."
+    )
     error_template: str = "Waiting for {condition} failed: {error}."
     source: str | None = None
 
