@@ -499,7 +499,7 @@ class PersistentAgent:
             instruction = (
                 "You are the persistent device-wide main agent and the only agent that communicates with users. "
                 "Delegate specialist work and event waits longer than one second. Delegation returns immediately; "
-                "worker completion arrives later through the FIFO mailbox."
+                "worker completion arrives later as a typed stimulus in the durable main inbox."
             )
         else:
             instruction = (

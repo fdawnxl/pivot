@@ -9,12 +9,13 @@ from pivot.activation import AgentCancelled, PersistentAgent
 from pivot.agents import AgentControl
 from pivot.capabilities import CapabilityRegistry
 from pivot.config import PivotConfig
-from pivot.control import ControlTaskState, PivotControl
+from pivot.control import PivotControl
 from pivot.credentials import ProviderCredential
 from pivot.events import EventPool, EventService, EventSupervisor
 from pivot.executors import ExecutorRegistry, ShellExecutor
 from pivot.memory import MemoryStore
 from pivot.runtime import PivotClient, Runtime
+from pivot.stimuli import StimulusState
 
 
 class EchoLLM:
@@ -54,17 +55,28 @@ def _runtime(tmp_path: Path, llm: Any | None = None) -> Runtime:
     return Runtime(config, registry, events, event_service, memory, main, None, executors, agents)
 
 
-def test_control_runs_tasks_and_reads_durable_history(tmp_path: Path) -> None:
+def test_control_injects_durable_envelopes_and_emits_outputs(tmp_path: Path) -> None:
     control = PivotControl(_runtime(tmp_path))
     events: list[tuple[str, str]] = []
     control.subscribe(lambda event, payload: events.append((event, str(payload.get("state", "")))))
 
-    task_id = control.submit_message("hello")
-    task = control.wait_task(task_id, timeout=2)
-    assert task.state == ControlTaskState.COMPLETED
-    assert task.result == {"agent_id": control.runtime.main_agent.agent_id, "response": "ack: hello"}
-    assert [message["role"] for message in control.history()] == ["user", "assistant"]
-    assert any(event == "task_changed" and state == "completed" for event, state in events)
+    stimulus_id = control.inject(
+        {
+            "kind": "command",
+            "source": "test-adapter",
+            "payload": {"content": "hello"},
+            "correlation_id": "request-1",
+        }
+    )
+    stimulus = control.wait_stimulus(stimulus_id, timeout=2)
+    assert stimulus.state == StimulusState.COMPLETED
+    assert stimulus.response == "ack: hello"
+    assert [message.role for message in control.runtime.main_agent.history] == ["user", "assistant"]
+    output = control.outputs()[0]
+    assert output.stimulus_id == stimulus_id
+    assert output.payload["content"] == "ack: hello"
+    assert any(event == "stimulus_changed" and state == "completed" for event, state in events)
+    assert any(event == "output_available" for event, _state in events)
     control.close()
     control.runtime.close()
 
@@ -98,7 +110,7 @@ def test_control_interrupts_local_main_activation(tmp_path: Path) -> None:
     client.close()
 
 
-def test_main_agent_requests_run_in_fifo_order(tmp_path: Path) -> None:
+def test_main_agent_stimuli_preserve_fifo_and_skip_cancelled_items(tmp_path: Path) -> None:
     first_started = threading.Event()
     release_first = threading.Event()
     received: list[str] = []
@@ -115,21 +127,44 @@ def test_main_agent_requests_run_in_fifo_order(tmp_path: Path) -> None:
 
     runtime = _runtime(tmp_path, OrderedLLM())
     control = PivotControl(runtime)
-    first = control.submit_message("first")
+    first = control.inject_command("first")
     assert first_started.wait(timeout=1)
-    second = control.submit_message("second")
-    cancelled = control.submit_message("cancelled")
-    third = control.submit_message("third")
+    second = control.inject_command("second")
+    cancelled = control.inject_command("cancelled")
+    third = control.inject_command("third")
     time.sleep(0.05)
-    assert control.task(second).state == ControlTaskState.QUEUED
-    assert control.task(cancelled).state == ControlTaskState.QUEUED
-    assert control.task(third).state == ControlTaskState.QUEUED
-    assert control.cancel_task(cancelled)
+    assert control.stimulus(second).state == StimulusState.QUEUED
+    assert control.stimulus(cancelled).state == StimulusState.QUEUED
+    assert control.stimulus(third).state == StimulusState.QUEUED
+    assert control.cancel_stimulus(cancelled)
     release_first.set()
-    assert control.wait_task(first, timeout=2).state == ControlTaskState.COMPLETED
-    assert control.wait_task(second, timeout=2).result["response"] == "ack: second"
-    assert control.wait_task(cancelled, timeout=2).state == ControlTaskState.CANCELLED
-    assert control.wait_task(third, timeout=2).result["response"] == "ack: third"
+    assert control.wait_stimulus(first, timeout=2).state == StimulusState.COMPLETED
+    assert control.wait_stimulus(second, timeout=2).response == "ack: second"
+    assert control.wait_stimulus(cancelled, timeout=2).state == StimulusState.CANCELLED
+    assert control.wait_stimulus(third, timeout=2).response == "ack: third"
     assert received == ["first", "second", "third"]
     control.close()
     runtime.close()
+
+
+def test_observation_uses_the_same_main_agent_reactor(tmp_path: Path) -> None:
+    control = PivotControl(_runtime(tmp_path))
+    stimulus_id = control.inject(
+        {
+            "kind": "observation",
+            "source": "instance.temperature-monitor",
+            "payload": {
+                "event": "temperature.high",
+                "value": 83.5,
+                "threshold": 80,
+            },
+            "priority": 80,
+            "dedupe_key": "temperature.high:started",
+        }
+    )
+    completed = control.wait_stimulus(stimulus_id, timeout=2)
+    assert completed.state == StimulusState.COMPLETED
+    assert '"kind":"observation"' in (completed.response or "")
+    assert control.runtime.main_agent.history[0].role == "system"
+    control.close()
+    control.runtime.close()

@@ -276,14 +276,14 @@ def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
     memory.close()
 
 
-def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
+def test_worker_completion_reenters_main_agent_as_typed_stimulus(tmp_path: Path) -> None:
     class CompletionLLM:
         def complete(self, messages, *, tools=()):
             context = json.loads(messages[0].content.split("\n", 1)[1])
             if context["agent"]["role"] == "worker":
                 return {"choices": [{"message": {"content": "worker evidence"}}]}
             assert any(
-                message.role == "system" and "worker_completion" in str(message.content)
+                message.role == "system" and '"kind":"worker_report"' in str(message.content)
                 for message in messages[1:]
             )
             return {"choices": [{"message": {"content": "worker evidence integrated"}}]}
@@ -327,25 +327,26 @@ def test_worker_completion_reenters_main_agent_mailbox(tmp_path: Path) -> None:
     )
     client = PivotClient(runtime)
     try:
-        delegated = client.control.submit(
+        delegated = agents.invoke_main(
             "agent.delegate",
             {"task": "collect evidence", "capabilities": [], "events": []},
         )
-        assert client.control.wait_task(delegated, timeout=2).state == "completed"
-        worker = agents.records()[1]
+        assert delegated["accepted"] is True
+        worker = agents.get(delegated["agent"]["agent_id"])
         agents.wait(worker.agent_id, timeout=2)
 
         deadline = time.monotonic() + 2
-        completion_task = None
+        completion_stimulus = None
         while time.monotonic() < deadline:
-            candidates = [task for task in client.control.tasks() if task.operation == "agent.message"]
+            candidates = [item for item in client.control.stimuli() if item.kind == "worker_report"]
             if candidates:
-                completion_task = client.control.wait_task(candidates[-1].task_id, timeout=0.2)
-                if completion_task.state not in {"queued", "running"}:
+                completion_stimulus = client.control.wait_stimulus(candidates[-1].stimulus_id, timeout=0.2)
+                if completion_stimulus.state not in {"queued", "processing"}:
                     break
             time.sleep(0.01)
-        assert completion_task is not None
-        assert completion_task.state == "completed"
+        assert completion_stimulus is not None
+        assert completion_stimulus.state == "completed"
+        assert completion_stimulus.payload["agent_id"] == worker.agent_id
         assert main.history[-1].content == "worker evidence integrated"
     finally:
         client.close()
