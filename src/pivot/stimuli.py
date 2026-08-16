@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -43,12 +43,26 @@ class StimulusState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class StimulusDelivery(StrEnum):
+    """Whether a stimulus updates state or activates the main agent."""
+
+    ACTIVATE = "activate"
+    STATE = "state"
+
+
 _DEFAULT_PRIORITIES = {
     StimulusKind.COMMAND: 50,
     StimulusKind.WORKER_REPORT: 40,
     StimulusKind.SYSTEM: 30,
     StimulusKind.OBSERVATION: 20,
     StimulusKind.TIMER: 10,
+}
+_DEFAULT_DELIVERY = {
+    StimulusKind.COMMAND: StimulusDelivery.ACTIVATE,
+    StimulusKind.OBSERVATION: StimulusDelivery.STATE,
+    StimulusKind.WORKER_REPORT: StimulusDelivery.ACTIVATE,
+    StimulusKind.TIMER: StimulusDelivery.ACTIVATE,
+    StimulusKind.SYSTEM: StimulusDelivery.ACTIVATE,
 }
 _TERMINAL_STATES = {StimulusState.COMPLETED, StimulusState.FAILED, StimulusState.CANCELLED}
 _MAX_ENVELOPE_BYTES = 1024 * 1024
@@ -64,12 +78,15 @@ class StimulusEnvelope:
     source: str
     payload: dict[str, Any]
     priority: int
+    delivery: StimulusDelivery
+    replay_safe: bool
     created_at: float
     correlation_id: str | None = None
     causation_id: str | None = None
     dedupe_key: str | None = None
     state: StimulusState = StimulusState.QUEUED
     attempts: int = 0
+    activation_id: str | None = None
     response: str | None = None
     error: str | None = None
 
@@ -83,6 +100,8 @@ class StimulusEnvelope:
             "source",
             "payload",
             "priority",
+            "delivery",
+            "replay_safe",
             "correlation_id",
             "causation_id",
             "dedupe_key",
@@ -112,6 +131,22 @@ class StimulusEnvelope:
         priority = value.get("priority", _DEFAULT_PRIORITIES[kind])
         if not isinstance(priority, int) or isinstance(priority, bool) or not -100 <= priority <= 100:
             raise StimulusError("Stimulus priority must be an integer between -100 and 100")
+        try:
+            delivery = StimulusDelivery(value.get("delivery", _DEFAULT_DELIVERY[kind]))
+        except (TypeError, ValueError) as exc:
+            raise StimulusError("Stimulus delivery must be 'activate' or 'state'") from exc
+        if delivery == StimulusDelivery.STATE:
+            values = payload_value.get("values")
+            if kind != StimulusKind.OBSERVATION or not isinstance(values, Mapping) or not values:
+                raise StimulusError("State delivery requires an observation payload.values object")
+            ttl = payload_value.get("ttl")
+            if ttl is not None and (
+                not isinstance(ttl, (int, float)) or isinstance(ttl, bool) or ttl <= 0
+            ):
+                raise StimulusError("Observation payload.ttl must be a positive number")
+        replay_safe = value.get("replay_safe", delivery == StimulusDelivery.STATE)
+        if not isinstance(replay_safe, bool):
+            raise StimulusError("Stimulus replay_safe must be a boolean")
         stimulus_id = _optional_uuid(value.get("stimulus_id"), "stimulus_id") or str(uuid4())
         correlation_id = _optional_identifier(value.get("correlation_id"), "correlation_id")
         causation_id = _optional_identifier(value.get("causation_id"), "causation_id")
@@ -123,6 +158,8 @@ class StimulusEnvelope:
             source.strip(),
             payload_value,
             priority,
+            delivery,
+            replay_safe,
             time.time(),
             correlation_id,
             causation_id,
@@ -156,12 +193,15 @@ class StimulusEnvelope:
             "source": self.source,
             "payload": self.payload,
             "priority": self.priority,
+            "delivery": self.delivery,
+            "replay_safe": self.replay_safe,
             "created_at": self.created_at,
             "correlation_id": self.correlation_id,
             "causation_id": self.causation_id,
             "dedupe_key": self.dedupe_key,
             "state": self.state,
             "attempts": self.attempts,
+            "activation_id": self.activation_id,
             "response": self.response,
             "error": self.error,
         }
@@ -202,8 +242,9 @@ class StimulusInbox:
         *,
         max_pending: int = 1000,
         retention_seconds: float = 7 * 24 * 3600,
+        priority_aging_seconds: float = 5.0,
     ) -> None:
-        if max_pending < 1 or retention_seconds <= 0:
+        if max_pending < 1 or retention_seconds <= 0 or priority_aging_seconds <= 0:
             raise ValueError("Stimulus inbox limits must be positive")
         self.store = store
         self.path = store.path
@@ -212,14 +253,19 @@ class StimulusInbox:
         self._condition = threading.Condition(self._lock)
         self.max_pending = max_pending
         self.retention_seconds = retention_seconds
+        self.priority_aging_seconds = priority_aging_seconds
         self._closed = False
         self._recover()
 
     def _recover(self) -> None:
         with self._lock, self._connection:
             self._connection.execute(
-                "UPDATE stimuli SET state = 'queued', updated_at = ? WHERE state = 'processing'",
+                "UPDATE stimuli SET state = 'queued', updated_at = ? WHERE state = 'processing' AND replay_safe = 1",
                 (time.time(),),
+            )
+            self._connection.execute(
+                "UPDATE stimuli SET state = 'failed', error = ?, updated_at = ? WHERE state = 'processing' AND replay_safe = 0",
+                ("Runtime stopped during an unsafe stimulus; automatic replay was refused", time.time()),
             )
 
     def enqueue(self, envelope: StimulusEnvelope) -> tuple[StimulusEnvelope, bool]:
@@ -238,9 +284,9 @@ class StimulusInbox:
             try:
                 self._connection.execute(
                     """INSERT INTO stimuli(
-                        stimulus_id, target_agent_id, kind, source, payload_json, priority,
+                        stimulus_id, target_agent_id, kind, source, payload_json, priority, delivery, replay_safe,
                         correlation_id, causation_id, dedupe_key, state, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
                     (
                         envelope.stimulus_id,
                         envelope.target_agent_id,
@@ -248,6 +294,8 @@ class StimulusInbox:
                         envelope.source,
                         _json(envelope.payload),
                         envelope.priority,
+                        envelope.delivery,
+                        int(envelope.replay_safe),
                         envelope.correlation_id,
                         envelope.causation_id,
                         envelope.dedupe_key,
@@ -271,7 +319,9 @@ class StimulusInbox:
             while not self._closed:
                 row = self._connection.execute(
                     """SELECT * FROM stimuli WHERE state = 'queued'
-                    ORDER BY priority DESC, created_at, stimulus_id LIMIT 1"""
+                    ORDER BY priority + CAST((? - created_at) / ? AS INTEGER) DESC,
+                        created_at, stimulus_id LIMIT 1""",
+                    (time.time(), self.priority_aging_seconds),
                 ).fetchone()
                 if row is not None:
                     with self._connection:
@@ -310,6 +360,17 @@ class StimulusInbox:
             if notify:
                 self._condition.notify_all()
         return self.get(stimulus_id)
+
+    def bind_activation(self, stimulus_id: str, activation_id: str) -> None:
+        """Link a claimed stimulus to the activation created for it."""
+
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE stimuli SET activation_id = ?, updated_at = ? WHERE stimulus_id = ? AND state = 'processing'",
+                (activation_id, time.time(), stimulus_id),
+            )
+            if not cursor.rowcount:
+                raise StimulusError(f"Stimulus is not processing: {stimulus_id}")
 
     def cancel_queued(self, stimulus_id: str) -> bool:
         with self._condition, self._connection:
@@ -351,9 +412,9 @@ class StimulusInbox:
                     raise TimeoutError(f"Timed out waiting for stimulus {stimulus_id}")
                 self._condition.wait(remaining)
 
-    def append_output(self, output: OutputEnvelope) -> None:
+    def append_output(self, output: OutputEnvelope) -> OutputEnvelope:
         with self._condition, self._connection:
-            self._connection.execute(
+            cursor = self._connection.execute(
                 """INSERT INTO outputs(
                     output_id, stimulus_id, agent_id, kind, payload_json, correlation_id, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -368,12 +429,16 @@ class StimulusInbox:
                 ),
             )
             self._condition.notify_all()
+        return replace(output, sequence=int(cursor.lastrowid))
 
-    def outputs(self, *, limit: int = 100) -> tuple[OutputEnvelope, ...]:
+    def outputs(self, *, after_sequence: int = 0, limit: int = 100) -> tuple[OutputEnvelope, ...]:
+        if after_sequence < 0:
+            raise ValueError("Output cursor must not be negative")
         limit = min(max(limit, 1), 1000)
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM outputs ORDER BY created_at DESC, output_id DESC LIMIT ?", (limit,)
+                "SELECT * FROM outputs WHERE sequence > ? ORDER BY sequence LIMIT ?",
+                (after_sequence, limit),
             ).fetchall()
         return tuple(_row_output(row) for row in rows)
 
@@ -417,6 +482,8 @@ class StimulusInbox:
                 or existing.source != envelope.source
                 or existing.payload != envelope.payload
                 or existing.priority != envelope.priority
+                or existing.delivery != envelope.delivery
+                or existing.replay_safe != envelope.replay_safe
                 or existing.correlation_id != envelope.correlation_id
                 or existing.causation_id != envelope.causation_id
                 or existing.dedupe_key != envelope.dedupe_key
@@ -561,12 +628,19 @@ class MainAgentReactor:
                 },
             )
 
+        if envelope.delivery == StimulusDelivery.STATE:
+            self._process_state(envelope)
+            return
+
         try:
-            response = self.main_agent.activate(
+            response = self.main_agent._activate(
                 envelope.activation_content(),
                 source="user" if envelope.kind == StimulusKind.COMMAND else envelope.kind.value,
                 progress=emit_progress,
                 cancellation=token,
+                started=lambda activation_id: self.inbox.bind_activation(
+                    envelope.stimulus_id, activation_id
+                ),
             )
         except AgentCancelled as exc:
             finished = self.inbox.finish(
@@ -597,12 +671,55 @@ class MainAgentReactor:
                 {"content": response, "stimulus_kind": envelope.kind.value, "source": envelope.source},
                 envelope.correlation_id,
             )
-            self.inbox.append_output(output)
+            output = self.inbox.append_output(output)
             self._emit("output_available", output.as_dict())
             finished = self.inbox.finish(
                 envelope.stimulus_id,
                 StimulusState.COMPLETED,
                 response=response,
+                notify=False,
+            )
+        finally:
+            with self._lock:
+                self._progress.pop(envelope.stimulus_id, None)
+                self._tokens.pop(envelope.stimulus_id, None)
+        self._emit("stimulus_changed", finished.as_dict())
+        self.inbox.wake()
+
+    def _process_state(self, envelope: StimulusEnvelope) -> None:
+        try:
+            values = dict(envelope.payload["values"])
+            ttl_value = envelope.payload.get("ttl")
+            ttl = float(ttl_value) if ttl_value is not None else None
+            self.inbox.store.update_world_state(envelope.source, values, ttl=ttl)
+            output = self.inbox.append_output(
+                OutputEnvelope(
+                    str(uuid4()),
+                    envelope.stimulus_id,
+                    self.main_agent.agent_id,
+                    "state_updated",
+                    {"fields": sorted(values), "source": envelope.source},
+                    envelope.correlation_id,
+                )
+            )
+        except Exception as exc:
+            LOGGER.error(
+                "State stimulus processing failed stimulus_id=%s error_type=%s",
+                envelope.stimulus_id,
+                type(exc).__name__,
+            )
+            finished = self.inbox.finish(
+                envelope.stimulus_id,
+                StimulusState.FAILED,
+                error=f"{type(exc).__name__}: {exc}",
+                notify=False,
+            )
+        else:
+            self._emit("output_available", output.as_dict())
+            finished = self.inbox.finish(
+                envelope.stimulus_id,
+                StimulusState.COMPLETED,
+                response="World state updated.",
                 notify=False,
             )
         finally:
@@ -642,12 +759,15 @@ def _row_stimulus(row: Any) -> StimulusEnvelope:
         str(row["source"]),
         dict(json.loads(row["payload_json"])),
         int(row["priority"]),
+        StimulusDelivery(row["delivery"]),
+        bool(row["replay_safe"]),
         float(row["created_at"]),
         str(row["correlation_id"]) if row["correlation_id"] is not None else None,
         str(row["causation_id"]) if row["causation_id"] is not None else None,
         str(row["dedupe_key"]) if row["dedupe_key"] is not None else None,
         StimulusState(row["state"]),
         int(row["attempts"]),
+        str(row["activation_id"]) if row["activation_id"] is not None else None,
         str(row["response"]) if row["response"] is not None else None,
         str(row["error"]) if row["error"] is not None else None,
     )

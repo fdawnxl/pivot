@@ -10,17 +10,23 @@ The framework does not implement wake-word detection, speech recognition, audio 
 {
   "kind": "command | observation | worker_report | timer | system",
   "source": "instance.temperature-monitor",
-  "payload": {},
+  "payload": {"values": {"temperature": 83.5}, "ttl": 30},
   "priority": 80,
+  "delivery": "state | activate",
+  "replay_safe": true,
   "correlation_id": "optional-id",
   "causation_id": "optional-parent-id",
   "dedupe_key": "optional-source-local-id"
 }
 ```
 
-`target_agent_id` is assigned by pivot and cannot be supplied by an adapter. The only external target is the durable main Agent. `command` payloads require `content`; other kinds carry a source-specific JSON object. Pivot assigns a UUID and timestamp, validates size and types, and records the source and causal identifiers.
+`target_agent_id` is assigned by pivot and cannot be supplied by an adapter. The only external target is the durable main Agent. `command` payloads require `content`. An observation with `delivery: "state"` requires a non-empty `payload.values` object and accepts an optional positive `ttl` in seconds.
 
-Stimuli are persisted in `memory/pivot.db`. The reactor claims the highest-priority queued item and preserves FIFO order among equal priorities. A unique `(source, dedupe_key)` pair makes retries idempotent. Items claimed when a process stops are returned to `queued` on the next runtime start.
+`observation` defaults to `state`: pivot updates world state and completes the stimulus without invoking an LLM. An adapter emits `delivery: "activate"` after its local threshold, hysteresis, or other attention policy decides that the main Agent must act. All other kinds default to `activate`.
+
+Stimuli are persisted in `memory/pivot.db`. Priority aging prevents a continuous urgent source from starving older work, and FIFO order is preserved when effective priorities match. The pending queue is bounded and old terminal records are removed according to instance configuration. A unique `(source, dedupe_key)` pair makes adapter retries idempotent.
+
+State-only observations default to `replay_safe: true`; activating stimuli default to `false`. After an unclean stop, only explicitly safe processing stimuli return to the queue. Unsafe stimuli become failed with a diagnostic error because a capability or executor side effect may already have happened.
 
 The lifecycle is `queued`, `processing`, then `completed`, `failed`, or `cancelled`. Every activation is bounded by the normal model round limit. A sensor adapter should perform debouncing, hysteresis, cooldown, and threshold evaluation in the instance/event layer before publishing repeated observations.
 
@@ -31,6 +37,7 @@ Successful main-agent results are persisted and emitted as:
 ```json
 {
   "output_id": "uuid",
+  "sequence": 42,
   "stimulus_id": "uuid",
   "agent_id": "uuid",
   "kind": "response",
@@ -43,6 +50,6 @@ Successful main-agent results are persisted and emitted as:
 }
 ```
 
-Adapters choose whether an output is relevant to them. A voice adapter may speak command responses; a logging or device adapter may consume observation outcomes. Pivot does not assume a presentation channel.
+`sequence` is a monotonically increasing instance-local cursor. Consumers resume with `ListOutputs(after_sequence, limit)`, persist the highest processed sequence, and can therefore recover after missing a transient D-Bus signal. Adapters choose whether an output is relevant to them. A voice adapter may speak command responses; a logging or device adapter may consume `state_updated` outputs. Pivot does not assume a presentation channel.
 
-Worker completion is represented as a `worker_report` stimulus with the worker snapshot in its payload. The main Agent therefore receives user commands, observations, system notices, and worker results through one scheduling and memory path.
+Worker completion is represented as a `worker_report` stimulus with the worker snapshot in its payload. Stimuli persist their activation id; delegated tasks persist their originating activation id; worker reports use the task id as their cause. This provides a durable command-to-report causal chain.

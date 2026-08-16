@@ -145,6 +145,7 @@ class RuntimeStore:
             task_id TEXT PRIMARY KEY,
             owner_agent_id TEXT NOT NULL REFERENCES agents(agent_id),
             parent_task_id TEXT,
+            origin_activation_id TEXT REFERENCES activations(activation_id),
             description TEXT NOT NULL,
             state TEXT NOT NULL,
             result_json TEXT,
@@ -179,6 +180,8 @@ class RuntimeStore:
             source TEXT NOT NULL,
             payload_json TEXT NOT NULL,
             priority INTEGER NOT NULL,
+            delivery TEXT NOT NULL,
+            replay_safe INTEGER NOT NULL,
             correlation_id TEXT,
             causation_id TEXT,
             dedupe_key TEXT,
@@ -549,17 +552,31 @@ class RuntimeStore:
         state: str,
         *,
         parent_task_id: str | None = None,
+        origin_activation_id: str | None = None,
         result: Any = None,
         error: str | None = None,
     ) -> None:
         now = time.time()
         with self._lock, self._connection:
             self._connection.execute(
-                """INSERT INTO tasks(task_id, owner_agent_id, parent_task_id, description, state, result_json, error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO tasks(
+                    task_id, owner_agent_id, parent_task_id, origin_activation_id,
+                    description, state, result_json, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET state=excluded.state, result_json=excluded.result_json,
                     error=excluded.error, updated_at=excluded.updated_at""",
-                (task_id, owner_agent_id, parent_task_id, description, state, _json(result) if result is not None else None, error, now, now),
+                (
+                    task_id,
+                    owner_agent_id,
+                    parent_task_id,
+                    origin_activation_id,
+                    description,
+                    state,
+                    _json(result) if result is not None else None,
+                    error,
+                    now,
+                    now,
+                ),
             )
 
     def save_continuation(

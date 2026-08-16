@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -214,6 +215,14 @@ def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) ->
     assert worker.report == {"finding": "scoped work complete"}
     assert worker.state == "completed"
     assert "agent_started" in [update.kind for update in updates]
+    with sqlite3.connect(runtime.memory.path) as connection:
+        task_origin = connection.execute(
+            "SELECT origin_activation_id FROM tasks WHERE task_id = ?", (worker.task_id,)
+        ).fetchone()[0]
+        assert task_origin is not None
+        assert connection.execute(
+            "SELECT count(*) FROM activations WHERE activation_id = ?", (task_origin,)
+        ).fetchone()[0] == 1
     with pytest.raises(AgentControlError, match="Unknown assigned capabilities"):
         runtime.agents.invoke_main(
             "agent.create",

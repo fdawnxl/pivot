@@ -80,8 +80,15 @@ def _service_interface(control: PivotControl) -> Any:
             return self._call(lambda: _json([item.as_dict() for item in control.stimuli(limit=limit)]))
 
         @method()
-        def ListOutputs(self, limit: "u") -> "s":
-            return self._call(lambda: _json([item.as_dict() for item in control.outputs(limit=limit)]))
+        def ListOutputs(self, after_sequence: "t", limit: "u") -> "s":
+            return self._call(
+                lambda: _json(
+                    [
+                        item.as_dict()
+                        for item in control.outputs(after_sequence=after_sequence, limit=limit)
+                    ]
+                )
+            )
 
         @method()
         def CancelStimulus(self, stimulus_id: "s") -> "b":

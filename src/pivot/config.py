@@ -51,6 +51,7 @@ class PivotConfig:
     event_max_wait: float = 3600.0
     stimulus_max_pending: int = 1000
     stimulus_retention_seconds: float = 7 * 24 * 3600
+    stimulus_priority_aging_seconds: float = 5.0
     dependency_install_timeout: float = 300.0
     dependency_start_timeout: float = 15.0
     dependency_dbus_timeout: float = 1.0
@@ -120,6 +121,7 @@ class PivotConfig:
             event_max_wait=get("event_max_wait", 3600.0, float),
             stimulus_max_pending=get("stimulus_max_pending", 1000, int),
             stimulus_retention_seconds=get("stimulus_retention_seconds", 7 * 24 * 3600, float),
+            stimulus_priority_aging_seconds=get("stimulus_priority_aging_seconds", 5.0, float),
             dependency_install_timeout=get("dependency_install_timeout", 300.0, float),
             dependency_start_timeout=get("dependency_start_timeout", 15.0, float),
             dependency_dbus_timeout=get("dependency_dbus_timeout", 1.0, float),
@@ -141,6 +143,7 @@ class PivotConfig:
             or config.event_max_wait <= 0
             or config.stimulus_max_pending < 1
             or config.stimulus_retention_seconds <= 0
+            or config.stimulus_priority_aging_seconds <= 0
             or config.dependency_install_timeout <= 0
             or config.dependency_start_timeout <= 0
             or config.dependency_dbus_timeout <= 0

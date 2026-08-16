@@ -48,6 +48,7 @@ class Runtime:
                 self.memory,
                 max_pending=self.config.stimulus_max_pending,
                 retention_seconds=self.config.stimulus_retention_seconds,
+                priority_aging_seconds=self.config.stimulus_priority_aging_seconds,
             )
         if self.reactor is None:
             self.reactor = MainAgentReactor(self._main_agent, self.agents, self.inbox)

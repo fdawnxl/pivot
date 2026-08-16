@@ -199,6 +199,7 @@ class PersistentAgent:
         source: str = "user",
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
+        started: Callable[[str], None] | None = None,
     ) -> str:
         """Run one finite activation; only framework gateways may call this method."""
 
@@ -214,6 +215,8 @@ class PersistentAgent:
             raise AgentActivationError("Agent is already active")
         token = cancellation or CancellationToken()
         activation_id = self.memory.create_activation(self.agent_id, source, normalized)
+        if started is not None:
+            started(activation_id)
         input_role = "user" if source == "user" else "system"
         self.memory.append_message(self.agent_id, activation_id, Message(input_role, normalized))
         query = normalized if isinstance(normalized, str) else json.dumps(list(normalized), ensure_ascii=False, default=str)
@@ -452,6 +455,7 @@ class PersistentAgent:
                 action.arguments,
                 cancellation=cancellation,
                 progress=progress,
+                origin_activation_id=activation_id,
             )
             self._emit_completed(progress, activation_id, "control", action, round_number, result)
             return result

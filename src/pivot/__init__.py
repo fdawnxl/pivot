@@ -12,6 +12,7 @@ from .runtime import PivotClient
 from .stimuli import (
     OutputEnvelope,
     StimulusEnvelope,
+    StimulusDelivery,
     StimulusError,
     StimulusKind,
     StimulusState,
@@ -41,6 +42,7 @@ __all__ = [
     "ShellExecutor",
     "OutputEnvelope",
     "StimulusEnvelope",
+    "StimulusDelivery",
     "StimulusError",
     "StimulusKind",
     "StimulusState",

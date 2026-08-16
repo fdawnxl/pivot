@@ -20,9 +20,9 @@ While a CLI process is running, pivot exports a narrow framework control surface
 
 Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+B` to toggle the agent sidebar, `Ctrl+G` to interrupt the main agent and its active workers, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The prompt accepts `/agents`, `/agent`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits and delegated workers stop during safe polling boundaries, while a synchronous model, capability, or executor request stops at its next safe boundary. The same runtime is available through `pivot.PivotClient.run_main` for non-terminal clients.
 
-The main Agent continuously consumes a durable SQLite inbox. Commands, observations, timers, system notices, and worker reports use one `StimulusEnvelope` contract. Priority selects urgent work while equal-priority inputs retain FIFO order; explicit source-local deduplication keys make adapter retries idempotent. Claimed inputs are returned to the queue after a runtime restart.
+The main Agent continuously consumes a bounded durable SQLite inbox. Commands, observations, timers, system notices, and worker reports use one `StimulusEnvelope` contract. Priority aging prevents starvation while equal effective priorities retain FIFO order; explicit source-local deduplication keys make adapter retries idempotent. Only inputs marked safe for replay return to the queue after an interrupted runtime.
 
-Wake-word detection, speech recognition, audio capture, TTS, sensor threshold policies, and other device-specific I/O belong to the instance. Pivot provides only the framework envelope and output contracts. For example, an instance voice adapter can inject a final transcript as a `command` and consume its correlated output without introducing voice code into the framework.
+Wake-word detection, speech recognition, audio capture, TTS, sensor threshold policies, and other device-specific I/O belong to the instance. Pivot provides only the framework envelope and output contracts. Raw observations default to a world-state update without an LLM call; an instance adapter uses `delivery = "activate"` when its attention policy requires main-Agent handling. Output sequences let adapters resume consumption after disconnecting.
 
 The TUI shows the selected provider, model, persistent Agent, capabilities, events, and live dependency health without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
 
@@ -72,6 +72,9 @@ executor_max_output_bytes = 1048576
 dbus_control_enabled = true
 dbus_control_bus = "session"
 dbus_control_service = "org.pivot.Control"
+stimulus_max_pending = 1000
+stimulus_retention_seconds = 604800
+stimulus_priority_aging_seconds = 5
 ```
 
 `PIVOT_PROVIDER` overrides the selected provider. Other runtime settings use `PIVOT_<NAME>`, then `config.toml`, then code defaults. Model names, API endpoints, and API keys are read only from `credentials.toml` and are never written to ordinary configuration or logs.
@@ -88,7 +91,7 @@ The corresponding environment variables are `PIVOT_LOG_DISPLAY_LEVEL` and `PIVOT
 
 ## Architecture
 
-`pivot.config` bootstraps an instance; `pivot.logging` configures output; `pivot.dependencies` manages external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts provider responses; `pivot.stimuli` owns the durable inbox, outputs and main-Agent reactor; `pivot.actions` normalizes model actions; `pivot.capabilities` dispatches `think`, `measure` and `work`; `pivot.executors` performs concrete execution; `pivot.events` owns event waits; `pivot.agents` owns main/worker control; `pivot.memory` owns durable identity and layered memory; and `pivot.activation` runs finite model/action activations.
+`pivot.config` bootstraps an instance; `pivot.logging` configures output; `pivot.dependencies` manages external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts provider responses; `pivot.memory.RuntimeStore` owns the database and schema; `pivot.stimuli` provides inbox/output repositories and the main-Agent reactor; `pivot.actions` normalizes model actions; `pivot.capabilities` dispatches `think`, `measure` and `work`; `pivot.executors` performs concrete execution; `pivot.events` owns condition waits; `pivot.agents` owns worker control; and `pivot.activation` runs internal finite model/action activations. External Python clients use `PivotClient.inject` or the command convenience `run_main`; no mutable main Agent is exposed.
 
 The preferred model operation is the single `pivot_action` tool with `{kind, name, arguments}`. The same detector accepts a textual fallback in the form `<pivot-action>{JSON}</pivot-action>`. Capability calls, event waits, framework control, executor requests, and memory operations all pass through this normalized route. Provider-native capability and event tools are normalized through the same router. See [agent control, actions, and executors](doc/agent-control.md) for the operation contract.
 

@@ -62,7 +62,7 @@ def test_dbus_control_only_exposes_framework_and_stimulus_operations(tmp_path: P
                 await asyncio.sleep(0.01)
             assert stimulus["state"] == "completed"
             assert stimulus["response"] == "ack: remote"
-            outputs = json.loads(await interface.call_list_outputs(10))
+            outputs = json.loads(await interface.call_list_outputs(0, 10))
             assert outputs[0]["stimulus_id"] == stimulus_id
         finally:
             bus.disconnect()

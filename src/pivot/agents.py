@@ -282,6 +282,7 @@ class AgentControl:
         *,
         cancellation: CancellationToken | None = None,
         progress: ProgressCallback | None = None,
+        origin_activation_id: str | None = None,
     ) -> Any:
         """Invoke one internal control operation on behalf of an agent."""
 
@@ -301,12 +302,24 @@ class AgentControl:
         if operation == "agent.assign":
             record = self.get(_required_string(arguments, "agent_id"))
             task = _required_string(arguments, "task")
-            return self._assign(record, task, cancellation=cancellation, progress=progress)
+            return self._assign(
+                record,
+                task,
+                cancellation=cancellation,
+                progress=progress,
+                origin_activation_id=origin_activation_id,
+            )
         if operation == "agent.delegate":
             task = _required_string(arguments, "task")
             creation = {key: value for key, value in arguments.items() if key != "task"}
             record = self._create(creation)
-            return self._assign(record, task, cancellation=cancellation, progress=progress)
+            return self._assign(
+                record,
+                task,
+                cancellation=cancellation,
+                progress=progress,
+                origin_activation_id=origin_activation_id,
+            )
         raise AgentControlError(f"Unknown agent control operation: {operation}")
 
     def invoke_main(
@@ -389,6 +402,7 @@ class AgentControl:
         *,
         cancellation: CancellationToken | None,
         progress: ProgressCallback | None,
+        origin_activation_id: str | None = None,
     ) -> dict[str, Any]:
         token = cancellation or CancellationToken()
         with self._lock:
@@ -404,7 +418,13 @@ class AgentControl:
             record.updated_at = time.time()
             record.cancellation = token
             self.memory.update_agent_state(record.agent_id, AgentState.RUNNING.value)
-            self.memory.upsert_task(record.task_id, record.agent_id, task, AgentState.RUNNING.value)
+            self.memory.upsert_task(
+                record.task_id,
+                record.agent_id,
+                task,
+                AgentState.RUNNING.value,
+                origin_activation_id=origin_activation_id,
+            )
         self._emit(progress, "agent_started", record, f"Delegated task to {record.name}.")
 
         record.future = self._executor.submit(self._run_assigned, record, task, token, progress)

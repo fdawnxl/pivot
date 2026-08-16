@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from pivot.memory import RuntimeStore
-from pivot.stimuli import StimulusEnvelope, StimulusError, StimulusInbox, StimulusState
+from pivot.stimuli import OutputEnvelope, StimulusEnvelope, StimulusError, StimulusInbox, StimulusState
 
 
 def _envelope(agent_id: str, *, source: str, content: str, priority: int = 50, **extra: object) -> StimulusEnvelope:
@@ -91,17 +91,34 @@ def test_stimulus_inbox_is_priority_ordered_idempotent_and_persistent(tmp_path: 
     memory.close()
 
 
-def test_processing_stimulus_is_requeued_after_runtime_restart(tmp_path: Path) -> None:
+def test_replay_safe_processing_stimulus_is_requeued_after_runtime_restart(tmp_path: Path) -> None:
     memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     inbox = StimulusInbox(memory)
-    envelope = _envelope(agent_id, source="timer", content="resume")
+    envelope = _envelope(agent_id, source="timer", content="resume", replay_safe=True)
     inbox.enqueue(envelope)
     assert inbox.claim_next(timeout=0.01).state == StimulusState.PROCESSING  # type: ignore[union-attr]
     inbox.close()
 
     recovered = StimulusInbox(memory)
     assert recovered.get(envelope.stimulus_id).state == StimulusState.QUEUED
+    recovered.close()
+    memory.close()
+
+
+def test_unsafe_processing_stimulus_is_failed_after_runtime_restart(tmp_path: Path) -> None:
+    memory = RuntimeStore(tmp_path / "memory")
+    agent_id = memory.main_agent_id()
+    inbox = StimulusInbox(memory)
+    envelope = _envelope(agent_id, source="client", content="may have side effects")
+    inbox.enqueue(envelope)
+    assert inbox.claim_next(timeout=0.01) is not None
+    inbox.close()
+
+    recovered = StimulusInbox(memory)
+    interrupted = recovered.get(envelope.stimulus_id)
+    assert interrupted.state == StimulusState.FAILED
+    assert "automatic replay was refused" in (interrupted.error or "")
     recovered.close()
     memory.close()
 
@@ -116,5 +133,27 @@ def test_stimulus_inbox_enforces_pending_limit(tmp_path: Path) -> None:
         inbox.enqueue(_envelope(agent_id, source="sensor-b", content="second"))
 
     assert inbox.pending_count() == 1
+    inbox.close()
+    memory.close()
+
+
+def test_outputs_support_monotonic_resume_cursor(tmp_path: Path) -> None:
+    memory = RuntimeStore(tmp_path / "memory")
+    agent_id = memory.main_agent_id()
+    inbox = StimulusInbox(memory)
+    first_stimulus = _envelope(agent_id, source="client", content="first")
+    second_stimulus = _envelope(agent_id, source="client", content="second")
+    inbox.enqueue(first_stimulus)
+    inbox.enqueue(second_stimulus)
+    first = inbox.append_output(
+        OutputEnvelope("output-1", first_stimulus.stimulus_id, agent_id, "response", {}, None)
+    )
+    second = inbox.append_output(
+        OutputEnvelope("output-2", second_stimulus.stimulus_id, agent_id, "response", {}, None)
+    )
+
+    assert first.sequence == 1
+    assert second.sequence == 2
+    assert [item.output_id for item in inbox.outputs(after_sequence=1)] == ["output-2"]
     inbox.close()
     memory.close()

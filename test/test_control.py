@@ -71,6 +71,7 @@ def test_control_injects_durable_envelopes_and_emits_outputs(tmp_path: Path) -> 
     stimulus = control.wait_stimulus(stimulus_id, timeout=2)
     assert stimulus.state == StimulusState.COMPLETED
     assert stimulus.response == "ack: hello"
+    assert stimulus.activation_id is not None
     assert [message.role for message in control.runtime._main_agent.history] == ["user", "assistant"]
     output = control.outputs()[0]
     assert output.stimulus_id == stimulus_id
@@ -152,6 +153,7 @@ def test_observation_uses_the_same_main_agent_reactor(tmp_path: Path) -> None:
     stimulus_id = control.inject(
         {
             "kind": "observation",
+            "delivery": "activate",
             "source": "instance.temperature-monitor",
             "payload": {
                 "event": "temperature.high",
@@ -166,5 +168,27 @@ def test_observation_uses_the_same_main_agent_reactor(tmp_path: Path) -> None:
     assert completed.state == StimulusState.COMPLETED
     assert '"kind":"observation"' in (completed.response or "")
     assert control.runtime._main_agent.history[0].role == "system"
+    control.close()
+    control.runtime.close()
+
+
+def test_observation_defaults_to_world_state_without_llm_activation(tmp_path: Path) -> None:
+    control = PivotControl(_runtime(tmp_path))
+    stimulus_id = control.inject(
+        {
+            "kind": "observation",
+            "source": "instance.temperature-sensor",
+            "payload": {"values": {"temperature": 23.5}, "ttl": 30},
+        }
+    )
+
+    completed = control.wait_stimulus(stimulus_id, timeout=2)
+    assert completed.state == StimulusState.COMPLETED
+    assert completed.activation_id is None
+    assert control.runtime.memory.current_world_state()[0]["value"] == 23.5
+    assert control.runtime._main_agent.history == ()
+    output = control.outputs()[0]
+    assert output.kind == "state_updated"
+    assert output.sequence == 1
     control.close()
     control.runtime.close()

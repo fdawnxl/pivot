@@ -21,14 +21,14 @@ GetRuntime()                            -> s JSON
 Inject(envelope_json: s)                -> s stimulus_id
 GetStimulus(stimulus_id: s)             -> s JSON
 ListStimuli(limit: u)                   -> s JSON
-ListOutputs(limit: u)                   -> s JSON
+ListOutputs(after_sequence: t, limit: u) -> s JSON
 CancelStimulus(stimulus_id: s)         -> b
 InterruptMain()                         -> b
 RequestReload()                         -> s JSON
 RequestShutdown()                       -> b
 ```
 
-`Inject` accepts the JSON shape documented in [the stimulus protocol](stimuli.md). Pivot binds the envelope to its one durable main Agent, validates it, and persists it before returning. `RequestReload` validates the current instance configuration and emits a reload request for the host process; applying provider, dependency, or environment changes requires an orderly runtime restart. `RequestShutdown` only requests shutdown and does not terminate a caller-owned process directly.
+`Inject` accepts the JSON shape documented in [the stimulus protocol](stimuli.md). Pivot binds the envelope to its one durable main Agent, validates it, and persists it before returning. `ListOutputs` returns ascending output sequences strictly after the supplied cursor. `RequestReload` validates the current instance configuration and emits a reload request for the host process; applying provider, dependency, or environment changes requires an orderly runtime restart. `RequestShutdown` only requests shutdown and does not terminate a caller-owned process directly.
 
 ## Signals
 

@@ -129,8 +129,8 @@ class PivotControl:
     def stimuli(self, *, limit: int = 100) -> tuple[StimulusEnvelope, ...]:
         return self.inbox.list(limit=limit)
 
-    def outputs(self, *, limit: int = 100) -> tuple[OutputEnvelope, ...]:
-        return self.inbox.outputs(limit=limit)
+    def outputs(self, *, after_sequence: int = 0, limit: int = 100) -> tuple[OutputEnvelope, ...]:
+        return self.inbox.outputs(after_sequence=after_sequence, limit=limit)
 
     def cancel_stimulus(self, stimulus_id: str) -> bool:
         try:
