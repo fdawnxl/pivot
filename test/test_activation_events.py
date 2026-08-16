@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
 
@@ -165,7 +164,7 @@ def test_event_supervisor_shares_source_reports_with_waits_and_subscribers() -> 
             assert source == "/event.py"
             return {"temperature": 42, "unit": "celsius"}
 
-    supervisor = EventSupervisor(pool, Runner())  # type: ignore[arg-type]
+    supervisor = EventSupervisor(pool, Runner())
     observed: list[dict[str, object]] = []
     unsubscribe = supervisor.subscribe("/event.py", lambda _source, payload: observed.append(dict(payload)))
     try:
@@ -175,6 +174,38 @@ def test_event_supervisor_shares_source_reports_with_waits_and_subscribers() -> 
 
     assert notifications[0].wait_id == wait.wait_id
     assert observed == [{"temperature": 42, "unit": "celsius"}]
+
+
+def test_event_supervisor_owns_one_background_poll_loop() -> None:
+    pool = EventPool()
+    pool.register(_temperature_event())
+    first = pool.create_wait("monitor_temperature", "agent-a", ">", 40, 5)
+    second = pool.create_wait("monitor_temperature", "agent-b", ">", 40, 5)
+    observed = threading.Event()
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll(self, source: str) -> dict[str, object]:
+            assert source == "/event.py"
+            self.calls += 1
+            return {"temperature": 42}
+
+    runner = Runner()
+    supervisor = EventSupervisor(pool, runner, poll_interval=60)
+    unsubscribe = supervisor.subscribe("/event.py", lambda *_: observed.set())
+    try:
+        supervisor.start()
+        assert observed.wait(timeout=1)
+        assert pool.wait_completion(first.wait_id, timeout=0.1) is not None
+        assert pool.wait_completion(second.wait_id, timeout=0.1) is not None
+        assert runner.calls == 1
+    finally:
+        unsubscribe()
+        supervisor.close()
+
+    assert not supervisor.running
 
 
 def test_event_bridge_rules_load_independently_and_validate_event_contract(tmp_path: Path) -> None:
@@ -301,13 +332,15 @@ def test_worker_event_wait_is_pending_then_resumes(tmp_path: Path) -> None:
     waiting = threading.Event()
     release = threading.Event()
 
-    class BlockingSupervisor:
-        def poll_once(self):
+    class BlockingRunner:
+        def poll(self, source: str):
+            assert source == "/event.py"
             waiting.set()
             release.wait(timeout=2)
-            return pool.report_source("/event.py", {"temperature": 42})
+            return {"temperature": 42}
 
-    service = EventService(pool, BlockingSupervisor(), poll_interval=0.01)  # type: ignore[arg-type]
+    supervisor = EventSupervisor(pool, BlockingRunner(), poll_interval=0.01)
+    service = EventService(pool, supervisor, poll_interval=0.01)
     memory = RuntimeStore(tmp_path / "memory")
     worker_id = memory.create_worker(name="waiter", parent_id=memory.main_agent_id(), capabilities=(), events=("monitor_temperature",))
     agent = PersistentAgent(
@@ -332,41 +365,34 @@ def test_worker_event_wait_is_pending_then_resumes(tmp_path: Path) -> None:
     thread.join(timeout=2)
     assert agent.state == ActivationState.READY
     assert result == ["Temperature reached the threshold."]
+    service.close()
     memory.close()
 
 
 def test_event_service_timeout_and_interruption() -> None:
-    now = [0.0]
-    pool = EventPool(clock=lambda: now[0])
+    pool = EventPool()
     pool.register(_temperature_event())
 
-    class IdleSupervisor:
-        def poll_once(self):
-            pool.report_source("/event.py", {"temperature": 20})
-            return pool.expire()
+    class IdleRunner:
+        def poll(self, source: str):
+            assert source == "/event.py"
+            return {"temperature": 20}
 
+    supervisor = EventSupervisor(pool, IdleRunner(), poll_interval=1)
     service = EventService(
         pool,
-        IdleSupervisor(),  # type: ignore[arg-type]
-        poll_interval=0.5,
-        sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        supervisor,
+        poll_interval=0.005,
     )
     notification = service.wait(
         agent_id="agent",
         event="monitor_temperature",
         operator=">",
         expected=40,
-        timeout=1,
+        timeout=0.02,
     )
     assert notification.status == "timeout"
 
-    cancelled = [False]
-    service = EventService(
-        pool,
-        IdleSupervisor(),  # type: ignore[arg-type]
-        poll_interval=0.01,
-        sleeper=lambda _: cancelled.__setitem__(0, True),
-    )
     with pytest.raises(InterruptedError):
         service.wait(
             agent_id="agent",
@@ -374,5 +400,6 @@ def test_event_service_timeout_and_interruption() -> None:
             operator=">",
             expected=40,
             timeout=1,
-            is_cancelled=lambda: cancelled[0],
+            is_cancelled=lambda: True,
         )
+    service.close()

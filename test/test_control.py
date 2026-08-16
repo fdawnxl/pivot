@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pivot.activation import AgentCancelled, PersistentAgent
 from pivot.agents import AgentControl
 from pivot.capabilities import CapabilityRegistry
@@ -81,6 +83,51 @@ def test_control_injects_durable_envelopes_and_emits_outputs(tmp_path: Path) -> 
     assert any(event == "output_available" for event, _state in events)
     control.close()
     control.runtime.close()
+
+
+def test_runtime_close_releases_every_component_after_failure(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.start()
+    assert runtime.event_bridge is not None
+    assert runtime.event_service.supervisor.running
+
+    released: list[bool] = []
+
+    class Lease:
+        def release(self) -> None:
+            released.append(True)
+
+    runtime.lease = Lease()  # type: ignore[assignment]
+
+    def fail_bridge_close() -> None:
+        raise RuntimeError("bridge close failed")
+
+    runtime.event_bridge.close = fail_bridge_close  # type: ignore[method-assign]
+    with pytest.raises(ExceptionGroup, match="Unable to close runtime") as captured:
+        runtime.close()
+
+    assert [str(error) for error in captured.value.exceptions] == ["bridge close failed"]
+    assert released == [True]
+    assert not runtime.event_service.supervisor.running
+    assert runtime.memory._closed
+    runtime.close()
+
+
+def test_client_close_releases_runtime_when_dbus_stop_fails(tmp_path: Path) -> None:
+    client = PivotClient(_runtime(tmp_path))
+
+    class BrokenDBusService:
+        def stop(self) -> None:
+            raise RuntimeError("D-Bus stop failed")
+
+    client._dbus_service = BrokenDBusService()
+    with pytest.raises(ExceptionGroup, match="Unable to close pivot client") as captured:
+        client.close()
+
+    assert [str(error) for error in captured.value.exceptions] == ["D-Bus stop failed"]
+    assert client.runtime._closed
+    assert client.runtime.memory._closed
+    client.close()
 
 
 def test_event_bridge_persists_occurrence_and_routes_through_main_inbox(tmp_path: Path) -> None:

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import Any
+
 from .agents import AgentControl
 from .activation import CancellationToken, PersistentAgent, ProgressCallback
 from .capabilities import CapabilityRegistry
@@ -46,50 +49,69 @@ class Runtime:
     inbox: StimulusInbox | None = None
     reactor: MainAgentReactor | None = None
     event_bridge: EventStimulusBridge | None = None
+    _started: bool = field(default=False, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    _lifecycle_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def start(self) -> None:
         """Start the persistent main-agent reactor once runtime services exist."""
 
-        if self.agents is None:
-            raise RuntimeError("Agent control is required to start the main-agent reactor")
-        if self.inbox is None:
-            self.inbox = StimulusInbox(
-                self.memory,
-                max_pending=self.config.stimulus_max_pending,
-                retention_seconds=self.config.stimulus_retention_seconds,
-                priority_aging_seconds=self.config.stimulus_priority_aging_seconds,
-            )
-        if self.reactor is None:
-            self.reactor = MainAgentReactor(self._main_agent, self.agents, self.inbox)
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("Runtime is closed")
+            if self._started:
+                return
+            if self.agents is None:
+                raise RuntimeError("Agent control is required to start the main-agent reactor")
+            if self.inbox is None:
+                self.inbox = StimulusInbox(
+                    self.memory,
+                    max_pending=self.config.stimulus_max_pending,
+                    retention_seconds=self.config.stimulus_retention_seconds,
+                    priority_aging_seconds=self.config.stimulus_priority_aging_seconds,
+                )
+            if self.reactor is None:
+                self.reactor = MainAgentReactor(self._main_agent, self.agents, self.inbox)
+            if self.event_bridge is None:
+                rules = load_event_bridge_rules(
+                    self.config.instance_path / "events" / "bridges.toml",
+                    self.events,
+                )
+                self.event_bridge = EventStimulusBridge(
+                    rules,
+                    supervisor=self.event_service.supervisor,
+                    store=self.memory,
+                    publish=self.reactor.inject_event_occurrence,
+                )
             self.reactor.start()
-        if self.event_bridge is None:
-            rules = load_event_bridge_rules(self.config.instance_path / "events" / "bridges.toml", self.events)
-            self.event_bridge = EventStimulusBridge(
-                rules,
-                supervisor=self.event_service.supervisor,
-                store=self.memory,
-                publish=self.reactor.inject_event_occurrence,
-                poll_interval=self.config.event_poll_interval,
-            )
+            self.event_service.start()
             self.event_bridge.start()
+            self._started = True
 
     def close(self) -> None:
         """Release runtime-owned external processes."""
 
-        if self.event_bridge is not None:
-            self.event_bridge.close()
-        if self.reactor is not None:
-            self.reactor.close()
-        if self.agents is not None:
-            self.agents.close()
-        self._main_agent.wait_until_idle()
-        if self.dependencies is not None:
-            self.dependencies.close()
-        if self.inbox is not None:
-            self.inbox.close()
-        self.memory.close()
-        if self.lease is not None:
-            self.lease.release()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            steps: list[tuple[str, Callable[[], None]]] = []
+            if self.event_bridge is not None:
+                steps.append(("event bridge", self.event_bridge.close))
+            if self.reactor is not None:
+                steps.append(("main-agent reactor", self.reactor.close))
+            if self.agents is not None:
+                steps.append(("agent control", self.agents.close))
+            steps.append(("main agent", self._main_agent.wait_until_idle))
+            steps.append(("event service", self.event_service.close))
+            if self.dependencies is not None:
+                steps.append(("dependency manager", self.dependencies.close))
+            if self.inbox is not None:
+                steps.append(("stimulus inbox", self.inbox.close))
+            steps.append(("runtime store", self.memory.close))
+            if self.lease is not None:
+                steps.append(("runtime lease", self.lease.release))
+            _close_all("runtime", steps)
 
 
 def build_runtime(config: PivotConfig) -> Runtime:
@@ -128,7 +150,11 @@ def build_runtime(config: PivotConfig) -> Runtime:
                 LOGGER.warning("Unable to register instance event %s: %s", event.name, exc)
         event_service = EventService(
             event_pool,
-            EventSupervisor(event_pool, event_runner),
+            EventSupervisor(
+                event_pool,
+                event_runner,
+                poll_interval=config.event_poll_interval,
+            ),
             poll_interval=config.event_poll_interval,
             max_wait=config.event_max_wait,
         )
@@ -192,10 +218,20 @@ def build_runtime(config: PivotConfig) -> Runtime:
         runtime.start()
         return runtime
     except BaseException:
-        dependencies.close()
-        if memory is not None:
-            memory.close()
-        lease.release()
+        if "runtime" in locals():
+            try:
+                runtime.close()
+            except Exception:
+                LOGGER.exception("Runtime cleanup after failed assembly was incomplete")
+        else:
+            steps: list[tuple[str, Callable[[], None]]] = [("dependency manager", dependencies.close)]
+            if memory is not None:
+                steps.append(("runtime store", memory.close))
+            steps.append(("runtime lease", lease.release))
+            try:
+                _close_all("incomplete runtime", steps)
+            except Exception:
+                LOGGER.exception("Runtime cleanup after failed assembly was incomplete")
         raise
 
 
@@ -209,6 +245,8 @@ class PivotClient:
         self.runtime.start()
         self.control = PivotControl(runtime)
         self._dbus_service: object | None = None
+        self._closed = False
+        self._close_lock = threading.RLock()
 
     @classmethod
     def open(cls, *, instance_path: str | None = None) -> "PivotClient":
@@ -281,17 +319,47 @@ class PivotClient:
     def close(self) -> None:
         """Release dependency processes owned by this client runtime."""
 
-        if self._dbus_service is not None:
-            self._dbus_service.stop()
-            self._dbus_service = None
-        self.control.close()
-        self.runtime.close()
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            steps: list[tuple[str, Callable[[], None]]] = []
+            if self._dbus_service is not None:
+                service = self._dbus_service
+                steps.append(("D-Bus control service", service.stop))
+                self._dbus_service = None
+            steps.extend(
+                (
+                    ("control facade", self.control.close),
+                    ("runtime", self.runtime.close),
+                )
+            )
+            _close_all("pivot client", steps)
 
     def __enter__(self) -> "PivotClient":
         return self
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def _close_all(name: str, steps: Iterable[tuple[str, Callable[[], None]]]) -> None:
+    """Run every cleanup step and report all ordinary failures together."""
+
+    errors: list[Exception] = []
+    for component, close in steps:
+        try:
+            close()
+        except Exception as exc:
+            LOGGER.error(
+                "Cleanup failed owner=%s component=%s error_type=%s",
+                name,
+                component,
+                type(exc).__name__,
+            )
+            errors.append(exc)
+    if errors:
+        raise ExceptionGroup(f"Unable to close {name} cleanly", errors)
 
 
 __all__ = ["PivotClient", "Runtime", "build_runtime"]

@@ -255,6 +255,7 @@ class StimulusInbox:
         self.retention_seconds = retention_seconds
         self.priority_aging_seconds = priority_aging_seconds
         self._closed = False
+        self._unpublished_terminal: set[str] = set()
         self._recover()
 
     def _recover(self) -> None:
@@ -411,7 +412,10 @@ class StimulusInbox:
             if not cursor.rowcount:
                 raise StimulusError(f"Unknown stimulus: {stimulus_id}")
             if notify:
+                self._unpublished_terminal.discard(stimulus_id)
                 self._condition.notify_all()
+            else:
+                self._unpublished_terminal.add(stimulus_id)
         return self.get(stimulus_id)
 
     def bind_activation(self, stimulus_id: str, activation_id: str) -> None:
@@ -456,7 +460,10 @@ class StimulusInbox:
         with self._condition:
             while True:
                 envelope = self.get(stimulus_id)
-                if envelope.state in _TERMINAL_STATES:
+                if (
+                    envelope.state in _TERMINAL_STATES
+                    and stimulus_id not in self._unpublished_terminal
+                ):
                     return envelope
                 if self._closed:
                     raise StimulusError("Stimulus inbox closed before processing completed")
@@ -526,6 +533,13 @@ class StimulusInbox:
 
     def wake(self) -> None:
         with self._condition:
+            self._condition.notify_all()
+
+    def publish_terminal(self, stimulus_id: str) -> None:
+        """Release waiters after the reactor has broadcast a terminal state."""
+
+        with self._condition:
+            self._unpublished_terminal.discard(stimulus_id)
             self._condition.notify_all()
 
     def _find_existing(self, envelope: StimulusEnvelope) -> StimulusEnvelope | None:
@@ -755,7 +769,7 @@ class MainAgentReactor:
                 self._progress.pop(envelope.stimulus_id, None)
                 self._tokens.pop(envelope.stimulus_id, None)
         self._emit("stimulus_changed", finished.as_dict())
-        self.inbox.wake()
+        self.inbox.publish_terminal(envelope.stimulus_id)
 
     def _process_state(self, envelope: StimulusEnvelope) -> None:
         try:
@@ -798,7 +812,7 @@ class MainAgentReactor:
                 self._progress.pop(envelope.stimulus_id, None)
                 self._tokens.pop(envelope.stimulus_id, None)
         self._emit("stimulus_changed", finished.as_dict())
-        self.inbox.wake()
+        self.inbox.publish_terminal(envelope.stimulus_id)
 
     def _on_worker_completion(self, record: AgentRecord) -> None:
         snapshot = record.as_dict()

@@ -9,7 +9,7 @@ python event.py -l   # list event descriptors
 python event.py -p   # return the current JSON field snapshot
 ```
 
-An event descriptor provides a stable name, description, field, supported comparison operators, optional result templates, and its source script. `EventSupervisor` serializes source polling and sends each successful report to both pending Agent waits and autonomous bridge subscribers.
+An event descriptor provides a stable name, description, field, supported comparison operators, optional result templates, and its source script. Runtime owns one background `EventSupervisor`: it polls every currently needed source once per cycle and sends each successful report to both pending Agent waits and autonomous bridge subscribers. Waiters block on completion notifications and bridges only subscribe, so neither creates a competing polling loop.
 
 ## Agent waits
 

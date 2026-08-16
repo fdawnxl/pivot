@@ -14,7 +14,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from .models import EventDescriptor
@@ -36,6 +36,12 @@ OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
 
 class EventError(RuntimeError):
     """Raised for invalid event definitions or operations."""
+
+
+class EventPoller(Protocol):
+    """Minimal source adapter required by the event supervisor."""
+
+    def poll(self, source: str) -> Mapping[str, Any]: ...
 
 
 class EventScriptRunner:
@@ -197,6 +203,7 @@ class EventPool:
         self._completed: dict[str, EventNotification] = {}
         self._clock = clock
         self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
 
     def register(self, event: EventDescriptor) -> None:
         if not event.operators or any(item not in OPERATORS for item in event.operators):
@@ -239,8 +246,10 @@ class EventPool:
         return wait
 
     def cancel(self, wait_id: str) -> bool:
-        with self._lock:
+        with self._condition:
             cancelled = self._waiters.pop(wait_id, None) is not None
+            if cancelled:
+                self._condition.notify_all()
         LOGGER.info("Event wait cancellation wait_id=%s cancelled=%s", wait_id, cancelled)
         return cancelled
 
@@ -248,6 +257,14 @@ class EventPool:
         with self._lock:
             names = {wait.event_name for wait in self._waiters.values()}
             return tuple(sorted({event.source for name in names if (event := self._events[name]).source is not None}))
+
+    def next_deadline_delay(self) -> float | None:
+        """Return seconds until the earliest pending wait expires."""
+
+        with self._lock:
+            if not self._waiters:
+                return None
+            return max(0.0, min(wait.deadline for wait in self._waiters.values()) - self._clock())
 
     def report_source(self, source: str, payload: Mapping[str, Any]) -> tuple[EventNotification, ...]:
         notifications: list[EventNotification] = []
@@ -302,6 +319,20 @@ class EventPool:
         with self._lock:
             return self._completed.pop(wait_id, None)
 
+    def wait_completion(self, wait_id: str, *, timeout: float) -> EventNotification | None:
+        """Wait briefly for one completion without polling an event source."""
+
+        if timeout <= 0:
+            raise ValueError("Event completion wait timeout must be positive")
+        with self._condition:
+            notification = self._completed.pop(wait_id, None)
+            if notification is not None:
+                return notification
+            if wait_id not in self._waiters:
+                return None
+            self._condition.wait(timeout)
+            return self._completed.pop(wait_id, None)
+
     def _complete_error(self, wait_id: str, error: str) -> EventNotification:
         wait = self._waiters[wait_id]
         event = self._events[wait.event_name]
@@ -318,6 +349,7 @@ class EventPool:
         wait = self._waiters.pop(wait_id)
         notification = EventNotification(wait_id, wait.event_name, wait.agent_id, status, message, dict(payload) if payload else None)
         self._completed[wait_id] = notification
+        self._condition.notify_all()
         LOGGER.info("Event wait completed event=%s wait_id=%s status=%s", wait.event_name, wait_id, status, extra={"event": wait.event_name})
         return notification
 
@@ -338,12 +370,88 @@ def load_event_scripts_isolated(root: str | Path, runner: EventScriptRunner) -> 
 class EventSupervisor:
     """Poll event scripts shared by waits and autonomous bridge subscribers."""
 
-    def __init__(self, pool: EventPool, runner: EventScriptRunner) -> None:
+    def __init__(
+        self,
+        pool: EventPool,
+        runner: EventPoller | None,
+        *,
+        poll_interval: float = 1.0,
+    ) -> None:
+        if poll_interval <= 0:
+            raise ValueError("Event poll interval must be positive")
         self.pool = pool
         self.runner = runner
+        self.poll_interval = poll_interval
         self._poll_lock = threading.Lock()
         self._listeners: dict[str, set[Callable[[str, Mapping[str, Any]], None]]] = {}
         self._listener_lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
+        self._stop = threading.Event()
+        self._wake_condition = threading.Condition()
+        self._wake_generation = 0
+        self._thread: threading.Thread | None = None
+
+    @property
+    def running(self) -> bool:
+        """Return whether the shared polling loop is active."""
+
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def start(self) -> None:
+        """Start the single polling loop shared by waits and subscribers."""
+
+        with self._lifecycle_lock:
+            if self.running:
+                return
+            if self._thread is not None:
+                raise EventError("Event supervisor cannot be restarted after stopping")
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="pivot-event-supervisor",
+                daemon=True,
+            )
+            self._thread.start()
+        LOGGER.info("Event supervisor started poll_interval=%g", self.poll_interval)
+
+    def close(self) -> None:
+        """Stop the shared polling loop once all event consumers are closed."""
+
+        with self._lifecycle_lock:
+            thread = self._thread
+            if thread is None:
+                return
+            self._stop.set()
+            self.wake()
+        if thread is not threading.current_thread():
+            thread.join()
+        LOGGER.info("Event supervisor stopped")
+
+    def wake(self) -> None:
+        """Wake the polling loop when its source set changes."""
+
+        with self._wake_condition:
+            self._wake_generation += 1
+            self._wake_condition.notify_all()
+
+    def _run(self) -> None:
+        with self._wake_condition:
+            generation = self._wake_generation
+        while not self._stop.is_set():
+            self.poll_once()
+            deadline_delay = self.pool.next_deadline_delay()
+            delay = (
+                self.poll_interval
+                if deadline_delay is None
+                else min(self.poll_interval, deadline_delay)
+            )
+            with self._wake_condition:
+                if self._stop.is_set():
+                    return
+                if generation == self._wake_generation:
+                    self._wake_condition.wait(delay)
+                generation = self._wake_generation
 
     def subscribe(
         self,
@@ -356,6 +464,7 @@ class EventSupervisor:
             raise ValueError("Event source must not be empty")
         with self._listener_lock:
             self._listeners.setdefault(source, set()).add(listener)
+        self.wake()
 
         def unsubscribe() -> None:
             with self._listener_lock:
@@ -364,6 +473,7 @@ class EventSupervisor:
                     listeners.discard(listener)
                     if not listeners:
                         self._listeners.pop(source, None)
+            self.wake()
 
         return unsubscribe
 
@@ -377,11 +487,17 @@ class EventSupervisor:
         with self._poll_lock:
             notifications.extend(self.pool.expire())
             for source in self._sources():
+                if self.runner is None:
+                    error = "Event source runner is unavailable"
+                    LOGGER.warning("Unable to poll event source %s: %s", source, error)
+                    notifications.extend(self.pool.fail_source(source, error))
+                    continue
                 try:
                     payload = self.runner.poll(source)
-                except EventError as exc:
-                    LOGGER.warning("Unable to poll event source %s: %s", source, exc)
-                    notifications.extend(self.pool.fail_source(source, str(exc)))
+                except Exception as exc:
+                    detail = str(exc) if isinstance(exc, EventError) else f"{type(exc).__name__}: {exc}"
+                    LOGGER.warning("Unable to poll event source %s: %s", source, detail)
+                    notifications.extend(self.pool.fail_source(source, detail))
                 else:
                     notifications.extend(self.pool.report_source(source, payload))
                     with self._listener_lock:
@@ -528,15 +644,11 @@ class EventStimulusBridge:
         supervisor: EventSupervisor,
         store: RuntimeStore,
         publish: Callable[[Mapping[str, Any], Mapping[str, Any]], str],
-        poll_interval: float = 1.0,
     ) -> None:
-        if poll_interval <= 0:
-            raise ValueError("Event bridge poll interval must be positive")
         self.rules = tuple(rules)
         self.supervisor = supervisor
         self.store = store
         self.publish = publish
-        self.poll_interval = poll_interval
         self._rules_by_source: dict[str, tuple[EventBridgeRule, ...]] = {}
         self._descriptors = {item.name: item for item in supervisor.pool.descriptors()}
         bridge_ids = [rule.bridge_id for rule in self.rules]
@@ -551,35 +663,21 @@ class EventStimulusBridge:
             source = descriptor.source
             self._rules_by_source[source] = (*self._rules_by_source.get(source, ()), rule)
         self._unsubscribers: list[Callable[[], None]] = []
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
 
     def start(self) -> None:
-        if self._thread is not None or not self._rules_by_source:
+        if self._unsubscribers or not self._rules_by_source:
             return
         for source in self._rules_by_source:
             self._unsubscribers.append(self.supervisor.subscribe(source, self.observe))
-        self._thread = threading.Thread(target=self._run, name="pivot-event-bridge", daemon=True)
-        self._thread.start()
         LOGGER.info("Event-to-stimulus bridge started rules=%d", len(self.rules))
 
     def close(self) -> None:
-        self._stop.set()
-        thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join()
-        self._thread = None
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()
         if self.rules:
             LOGGER.info("Event-to-stimulus bridge stopped rules=%d", len(self.rules))
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.supervisor.poll_once()
-            self._stop.wait(self.poll_interval)
 
     def observe(self, source: str, payload: Mapping[str, Any]) -> None:
         """Evaluate one successful source observation against configured bridge rules."""
@@ -705,7 +803,6 @@ class EventService:
         *,
         poll_interval: float = 1.0,
         max_wait: float = 3600.0,
-        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         if poll_interval <= 0 or max_wait <= 0:
             raise ValueError("poll_interval and max_wait must be greater than zero")
@@ -713,7 +810,16 @@ class EventService:
         self.supervisor = supervisor
         self.poll_interval = poll_interval
         self.max_wait = max_wait
-        self.sleeper = sleeper
+
+    def start(self) -> None:
+        """Start the runtime-owned event polling supervisor."""
+
+        self.supervisor.start()
+
+    def close(self) -> None:
+        """Stop the runtime-owned event polling supervisor."""
+
+        self.supervisor.close()
 
     def llm_tools(self, event_names: tuple[str, ...] | None = None) -> tuple[dict[str, Any], ...]:
         """Return the event wait tool limited to an agent's assigned event names."""
@@ -760,16 +866,19 @@ class EventService:
     ) -> EventNotification:
         if timeout > self.max_wait:
             raise EventError(f"Event timeout exceeds configured maximum ({self.max_wait:g} seconds)")
+        self.start()
         request = self.pool.create_wait(event, agent_id, operator, expected, timeout)
+        self.supervisor.wake()
         try:
             while True:
                 if is_cancelled is not None and is_cancelled():
                     raise InterruptedError("Event wait interrupted by the caller")
-                self.supervisor.poll_once()
-                notification = self.pool.take_completion(request.wait_id)
+                notification = self.pool.wait_completion(
+                    request.wait_id,
+                    timeout=min(self.poll_interval, timeout),
+                )
                 if notification is not None:
                     return notification
-                self.sleeper(min(self.poll_interval, timeout))
         except BaseException:
             self.pool.cancel(request.wait_id)
             raise
@@ -786,6 +895,7 @@ __all__ = [
     "EVENT_WAIT_TOOL",
     "EventError",
     "EventNotification",
+    "EventPoller",
     "EventPool",
     "EventScriptRunner",
     "EventService",
