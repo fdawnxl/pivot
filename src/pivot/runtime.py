@@ -30,7 +30,7 @@ class Runtime:
     events: EventPool
     event_service: EventService
     memory: RuntimeStore
-    main_agent: PersistentAgent
+    _main_agent: PersistentAgent
     dependencies: DependencyManager | None = None
     executors: ExecutorRegistry | None = None
     agents: AgentControl | None = None
@@ -50,7 +50,7 @@ class Runtime:
                 retention_seconds=self.config.stimulus_retention_seconds,
             )
         if self.reactor is None:
-            self.reactor = MainAgentReactor(self.main_agent, self.agents, self.inbox)
+            self.reactor = MainAgentReactor(self._main_agent, self.agents, self.inbox)
             self.reactor.start()
 
     def close(self) -> None:
@@ -60,7 +60,7 @@ class Runtime:
             self.reactor.close()
         if self.agents is not None:
             self.agents.close()
-        self.main_agent.wait_until_idle()
+        self._main_agent.wait_until_idle()
         if self.dependencies is not None:
             self.dependencies.close()
         if self.inbox is not None:
@@ -194,10 +194,16 @@ class PivotClient:
 
         return cls(build_runtime(PivotConfig.load(instance_path=instance_path)))
 
-    def main_agent(self) -> PersistentAgent:
-        """Return the sole user-facing main agent."""
+    @property
+    def main_agent_id(self) -> str:
+        """Return the stable identity of the instance's main agent."""
 
-        return self.runtime.main_agent
+        return self.runtime._main_agent.agent_id
+
+    def main_history(self) -> tuple[Any, ...]:
+        """Return a read-only snapshot of visible main-agent messages."""
+
+        return self.runtime._main_agent.history
 
     def run_main(
         self,

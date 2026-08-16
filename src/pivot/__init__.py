@@ -1,21 +1,18 @@
 """pivot: a layered agent framework for edge and embodied systems."""
 
 from .actions import ACTION_TOOL, ActionDetector, ActionKind, ActionRequest
-from .activation import AgentCancelled, ActivationState, CancellationToken, PersistentAgent
-from .agents import AgentControl, AgentControlError, AgentRecord, AgentRole, AgentState
+from .activation import AgentCancelled, ActivationState, CancellationToken
 from .config import PivotConfig
 from .control import ControlError, PivotControl
 from .dbus_control import ControlDBusService
 from .dependencies import DependencyDBus, DependencyManager, DependencyState, DependencyStatus
 from .executors import ExecutorDescriptor, ExecutorError, ExecutorRegistry, ShellExecutor
 from .lease import RuntimeLeaseError
-from .runtime import PivotClient, Runtime, build_runtime
+from .runtime import PivotClient
 from .stimuli import (
-    MainAgentReactor,
     OutputEnvelope,
     StimulusEnvelope,
     StimulusError,
-    StimulusInbox,
     StimulusKind,
     StimulusState,
 )
@@ -25,11 +22,6 @@ __all__ = [
     "ActionDetector",
     "ActionKind",
     "ActionRequest",
-    "AgentControl",
-    "AgentControlError",
-    "AgentRecord",
-    "AgentRole",
-    "AgentState",
     "AgentCancelled",
     "ActivationState",
     "CancellationToken",
@@ -45,17 +37,12 @@ __all__ = [
     "PivotClient",
     "PivotConfig",
     "PivotControl",
-    "Runtime",
     "RuntimeLeaseError",
-    "PersistentAgent",
     "ShellExecutor",
-    "MainAgentReactor",
     "OutputEnvelope",
     "StimulusEnvelope",
     "StimulusError",
-    "StimulusInbox",
     "StimulusKind",
     "StimulusState",
-    "build_runtime",
 ]
 __version__ = "0.1.0"

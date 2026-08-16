@@ -88,7 +88,7 @@ def test_fixed_text_action_executes_through_agent_router(tmp_path: Path) -> None
         executors=executors,
     )
 
-    assert agent.activate("run it") == "Execution was routed."
+    assert agent._activate("run it") == "Execution was routed."
     assert agent.history[1].content == ""
     assert agent.history[1].tool_calls[0].name == ACTION_TOOL
     memory.close()
@@ -202,7 +202,7 @@ def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) ->
     assert runtime.agents is not None
     updates = []
 
-    response = runtime.agents.main_agent.activate("Handle this", progress=updates.append)
+    response = runtime.agents.main_agent._activate("Handle this", progress=updates.append)
 
     assert response == "Worker task accepted."
     records = runtime.agents.records()

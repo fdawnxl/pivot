@@ -21,7 +21,7 @@ from .agents import AgentRecord
 from .dependencies import DependencyState, DependencyStatus
 from .models import Message
 from .runtime import PivotClient
-from .activation import ActivationProgress, AgentCancelled, CancellationToken, PersistentAgent
+from .activation import ActivationProgress, AgentCancelled, CancellationToken
 from .ui import safe_endpoint
 from .stimuli import StimulusState
 
@@ -558,13 +558,13 @@ class PivotApp(App[None]):
     }
     """
 
-    def __init__(self, client: PivotClient, agent: PersistentAgent, *, show_welcome: bool = True) -> None:
+    def __init__(self, client: PivotClient, *, show_welcome: bool = True) -> None:
         super().__init__()
         self.register_theme(PIVOT_THEME)
         self.theme = PIVOT_THEME.name
         self.client = client
         self.runtime = client.runtime
-        self.main_agent = agent
+        self.main_agent_id = client.main_agent_id
         self.show_welcome = show_welcome
         self.turns: dict[str, TurnState] = {}
         self.agent_activations: dict[str, list[str]] = {}
@@ -645,7 +645,7 @@ class PivotApp(App[None]):
             self._schedule_agent_refresh()
             correlation_id = payload.get("correlation_id")
             if (
-                agent_id == self.main_agent.agent_id
+                agent_id == self.main_agent_id
                 and agent_id not in self.agent_activations
                 and correlation_id not in self.turns
             ):
@@ -687,7 +687,7 @@ class PivotApp(App[None]):
             self.query_one("#prompt", PromptEditor).text = ""
             await self._run_command(prompt)
             return
-        agent_id = self.main_agent.agent_id
+        agent_id = self.main_agent_id
         editor = self.query_one("#prompt", PromptEditor)
         editor.text = ""
         turn = TurnState(str(uuid4()), agent_id, prompt)
@@ -894,7 +894,7 @@ class PivotApp(App[None]):
             queued.remove(turn.turn_id)
         if not queued:
             self.agent_activations.pop(turn.agent_id, None)
-        if turn.agent_id == self.main_agent.agent_id:
+        if turn.agent_id == self.main_agent_id:
             workflow = self._workflow_for(turn)
             if workflow is not None:
                 if not turn.steps and error is None and not interrupted:
@@ -949,7 +949,7 @@ class PivotApp(App[None]):
                 return
 
     def _refresh_workflow(self, turn: TurnState) -> None:
-        if turn.agent_id != self.main_agent.agent_id:
+        if turn.agent_id != self.main_agent_id:
             return
         workflow = self._workflow_for(turn)
         if workflow is not None:
@@ -961,13 +961,13 @@ class PivotApp(App[None]):
         return next((view for view in self.query(WorkflowView) if view.state.turn_id == turn.turn_id), None)
 
     async def _show_main_agent(self, *, focus_prompt: bool = True) -> None:
-        agent = self.main_agent
+        agent_id = self.main_agent_id
         timeline = self.query_one("#timeline", VerticalScroll)
         await timeline.remove_children()
-        messages = tuple(_visible_messages(agent.history))
+        messages = tuple(_visible_messages(self.client.main_history()))
         if messages:
             await timeline.mount(*(AgentMessage(role, content) for role, content in messages))
-        turn_ids = self.agent_activations.get(agent.agent_id, [])
+        turn_ids = self.agent_activations.get(agent_id, [])
         for turn_id in turn_ids:
             turn = self.turns[turn_id]
             if not messages or messages[-1] != ("user", turn.prompt):
@@ -1038,7 +1038,7 @@ class PivotApp(App[None]):
             empty.first().remove()
 
     def _update_header(self) -> None:
-        agent_id = self.main_agent.agent_id
+        agent_id = self.main_agent_id
         title = "Main Agent"
         self.query_one("#agent-title", Static).update(title)
         turn_ids = self.agent_activations.get(agent_id, [])
@@ -1059,7 +1059,7 @@ class PivotApp(App[None]):
         elif command in {"/agents", "/sidebar"}:
             self.action_toggle_agents()
         elif command == "/agent":
-            await self._append_notice(f"Main agent: {self.main_agent.agent_id}")
+            await self._append_notice(f"Main agent: {self.main_agent_id}")
         elif command == "/help":
             await self._append_notice(
                 "Commands: /agents, /agent, /stop, /help, /exit\n"
@@ -1086,7 +1086,7 @@ class PivotApp(App[None]):
         agent_list.focus()
 
     def action_interrupt_turn(self) -> None:
-        turn_ids = self.agent_activations.get(self.main_agent.agent_id, [])
+        turn_ids = self.agent_activations.get(self.main_agent_id, [])
         if not turn_ids:
             self.notify("The main agent is not running.")
             return
@@ -1122,11 +1122,11 @@ class PivotApp(App[None]):
         self._quit_armed = False
 
 
-def run_tui(client: PivotClient, agent: PersistentAgent, *, show_welcome: bool = True) -> bool:
+def run_tui(client: PivotClient, *, show_welcome: bool = True) -> bool:
     """Run the TUI and report whether the host should rebuild the runtime."""
 
     LOGGER.info("Textual interface started agent_id=%s", agent.agent_id)
-    app = PivotApp(client, agent, show_welcome=show_welcome)
+    app = PivotApp(client, show_welcome=show_welcome)
     app.run()
     LOGGER.info("Textual interface stopped agent_id=%s", agent.agent_id)
     return app.reload_requested

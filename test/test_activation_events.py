@@ -46,7 +46,7 @@ def test_activation_executes_tools_and_persists_in_sqlite(tmp_path: Path) -> Non
     agent_id = memory.main_agent_id()
     agent = PersistentAgent(agent_id, llm=ToolLLM(), capabilities=registry, memory=memory, max_rounds=3)
     updates = []
-    assert agent.activate("hello", progress=updates.append) == "finished"
+    assert agent._activate("hello", progress=updates.append) == "finished"
     assert [message.role for message in agent.history] == ["user", "assistant", "tool", "assistant"]
     kinds = [update.kind for update in updates]
     assert kinds[0] == "activation_started"
@@ -76,7 +76,7 @@ def test_activation_preserves_multimodal_content(tmp_path: Path) -> None:
         capabilities=CapabilityRegistry(),
         memory=memory,
     )
-    assert agent.activate([{"type": "text", "text": "What do you see?"}]) == "Captured from the camera."
+    assert agent._activate([{"type": "text", "text": "What do you see?"}]) == "Captured from the camera."
     assert agent.history[0].content == ({"type": "text", "text": "What do you see?"},)
     assert agent.history[1].content == tuple(content)
     memory.close()
@@ -94,7 +94,7 @@ def test_activation_state_tracks_running_and_ready(tmp_path: Path) -> None:
 
     memory = RuntimeStore(tmp_path / "memory")
     agent = PersistentAgent(memory.main_agent_id(), llm=BlockingLLM(), capabilities=CapabilityRegistry(), memory=memory)
-    thread = threading.Thread(target=agent.activate, args=("hello",))
+    thread = threading.Thread(target=agent._activate, args=("hello",))
     thread.start()
     assert started.wait(timeout=1)
     assert agent.state == ActivationState.RUNNING
@@ -115,7 +115,7 @@ def test_cancelled_activation_is_excluded_from_later_context(tmp_path: Path) -> 
     memory = RuntimeStore(tmp_path / "memory")
     agent = PersistentAgent(memory.main_agent_id(), llm=CancellingLLM(), capabilities=CapabilityRegistry(), memory=memory)
     with pytest.raises(AgentCancelled):
-        agent.activate("cancel me", cancellation=token)
+        agent._activate("cancel me", cancellation=token)
     assert [message.role for message in agent.history] == ["user"]
     memory.close()
 
@@ -230,7 +230,7 @@ def test_worker_event_wait_is_pending_then_resumes(tmp_path: Path) -> None:
     )
     result: list[str] = []
     thread = threading.Thread(
-        target=lambda: result.append(agent.activate("wait", source="delegation")),
+        target=lambda: result.append(agent._activate("wait", source="delegation")),
     )
     thread.start()
     assert waiting.wait(timeout=1)

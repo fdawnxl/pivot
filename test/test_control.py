@@ -71,7 +71,7 @@ def test_control_injects_durable_envelopes_and_emits_outputs(tmp_path: Path) -> 
     stimulus = control.wait_stimulus(stimulus_id, timeout=2)
     assert stimulus.state == StimulusState.COMPLETED
     assert stimulus.response == "ack: hello"
-    assert [message.role for message in control.runtime.main_agent.history] == ["user", "assistant"]
+    assert [message.role for message in control.runtime._main_agent.history] == ["user", "assistant"]
     output = control.outputs()[0]
     assert output.stimulus_id == stimulus_id
     assert output.payload["content"] == "ack: hello"
@@ -165,6 +165,6 @@ def test_observation_uses_the_same_main_agent_reactor(tmp_path: Path) -> None:
     completed = control.wait_stimulus(stimulus_id, timeout=2)
     assert completed.state == StimulusState.COMPLETED
     assert '"kind":"observation"' in (completed.response or "")
-    assert control.runtime.main_agent.history[0].role == "system"
+    assert control.runtime._main_agent.history[0].role == "system"
     control.close()
     control.runtime.close()

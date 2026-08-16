@@ -118,7 +118,7 @@ async def test_textual_cli_displays_agent_dependencies_and_global_controls(tmp_p
     runtime = _runtime(tmp_path)
     object.__setattr__(runtime, "dependencies", Dependencies())
     client = PivotClient(runtime)
-    app = PivotApp(client, client.main_agent())
+    app = PivotApp(client)
     async with app.run_test(size=(140, 36)) as pilot:
         assert [item.record.role.value for item in app.query(AgentItem)] == ["main"]
         dependencies = list(app.query(DependencyItem))
@@ -195,7 +195,7 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
         lambda value: {"value": value},
     )
     client = PivotClient(runtime)
-    app = PivotApp(client, client.main_agent())
+    app = PivotApp(client)
     async with app.run_test(size=(120, 36)) as pilot:
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "measure it"
@@ -230,7 +230,7 @@ async def test_textual_cli_queues_messages_while_main_agent_runs(tmp_path: Path)
             return {"choices": [{"message": {"content": f"ack {prompt}"}}]}
 
     client = PivotClient(_runtime(tmp_path, SlowLLM()))
-    app = PivotApp(client, client.main_agent())
+    app = PivotApp(client)
     async with app.run_test(size=(120, 36)) as pilot:
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "first"
@@ -262,14 +262,14 @@ async def test_textual_cli_interrupts_active_activation(tmp_path: Path) -> None:
             return {"choices": [{"message": {"content": "late response"}}]}
 
     client = PivotClient(_runtime(tmp_path, SlowLLM()))
-    app = PivotApp(client, client.main_agent())
+    app = PivotApp(client)
     async with app.run_test(size=(120, 36)) as pilot:
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "long task"
         await pilot.press("enter")
         assert started.wait(timeout=1)
         await pilot.press("ctrl+g")
-        turn = app.turns[app.agent_activations[app.main_agent.agent_id][0]]
+        turn = app.turns[app.agent_activations[app.main_agent_id][0]]
         assert turn.cancellation.is_cancelled()
         release.set()
         await pilot.pause(0.3)
@@ -282,7 +282,7 @@ async def test_textual_cli_interrupts_active_activation(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_textual_cli_commands_and_compact_layout(tmp_path: Path) -> None:
     client = PivotClient(_runtime(tmp_path))
-    app = PivotApp(client, client.main_agent())
+    app = PivotApp(client)
     async with app.run_test(size=(72, 24)) as pilot:
         assert app.has_class("compact")
         assert app.query_one("#body").has_class("agents-hidden")
@@ -299,13 +299,14 @@ async def test_textual_cli_commands_and_compact_layout(tmp_path: Path) -> None:
     client.close()
 
 
-def test_pivot_client_exposes_only_persistent_main_agent(tmp_path: Path) -> None:
+def test_pivot_client_exposes_gateway_without_mutable_main_agent(tmp_path: Path) -> None:
     client = PivotClient(_runtime(tmp_path))
     try:
-        main = client.main_agent()
-        assert client.main_agent() is main
+        assert not hasattr(client, "main_agent")
+        assert client.main_agent_id
         assert not hasattr(client.control, "submit")
         assert not hasattr(client.control, "operations")
         assert client.run_main("hello") == "ack"
+        assert [message.role for message in client.main_history()] == ["user", "assistant"]
     finally:
         client.close()

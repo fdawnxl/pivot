@@ -13,7 +13,6 @@ from .config import ConfigurationError, PivotConfig
 from .dbus_control import ControlDBusError
 from .logging import configure_logging, configure_tui_logging
 from .runtime import PivotClient, Runtime, build_runtime
-from .activation import PersistentAgent
 from .tui import run_tui
 from .ui import RuntimeSummary, render_banner, safe_endpoint
 
@@ -30,12 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _show_banner(runtime: Runtime, agent: PersistentAgent, stream: TextIO) -> None:
+def _show_banner(runtime: Runtime, agent_id: str, stream: TextIO) -> None:
     summary = RuntimeSummary(
         provider=runtime.config.provider.name,
         model=runtime.config.provider.model,
         endpoint=safe_endpoint(runtime.config.provider.api_base),
-        agent_id=agent.agent_id,
+        agent_id=agent_id,
         capabilities=runtime.registry.descriptors(),
         events=runtime.events.descriptors(),
     )
@@ -64,7 +63,7 @@ def _run_once(args: argparse.Namespace) -> tuple[int, bool]:
     try:
         client = PivotClient(build_runtime(PivotConfig.load(instance_path=args.instance)))
         runtime = client.runtime
-        agent = client.main_agent()
+        agent_id = client.main_agent_id
         dbus_required = args.dbus_only
         if runtime.config.dbus_control_enabled and not args.no_dbus:
             try:
@@ -83,14 +82,14 @@ def _run_once(args: argparse.Namespace) -> tuple[int, bool]:
             return 0, _wait_for_shutdown(client)
         if args.message is None and sys.stdin.isatty():
             configure_tui_logging()
-            return 0, run_tui(client, agent, show_welcome=not args.no_banner)
+            return 0, run_tui(client, show_welcome=not args.no_banner)
         if not args.no_banner:
-            _show_banner(runtime, agent, sys.stderr)
+            _show_banner(runtime, agent_id, sys.stderr)
         message = args.message if args.message is not None else sys.stdin.read().strip()
         if not message.strip():
             raise ConfigurationError("A message argument or stdin input is required")
         response = client.run_main(message)
-        LOGGER.info("CLI request completed agent_id=%s", agent.agent_id)
+        LOGGER.info("CLI request completed agent_id=%s", agent_id)
         sys.stdout.write(response + "\n")
         return 0, False
     except Exception as exc:

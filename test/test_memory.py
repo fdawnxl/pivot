@@ -193,7 +193,7 @@ def test_memory_action_is_routed_through_agent_activation(tmp_path: Path) -> Non
         memory_service=MemoryService(memory),
         max_rounds=3,
     )
-    assert agent.activate("Remember this") == "Preference saved."
+    assert agent._activate("Remember this") == "Preference saved."
     recalled = memory.recall("concise", namespaces=(f"agent:{agent_id}",))
     assert len(recalled) == 1
     assert recalled[0].kind == "preference"

@@ -429,7 +429,7 @@ class AgentControl:
             )
 
         try:
-            response = record.agent.activate(
+            response = record.agent._activate(
                 task,
                 source="delegation",
                 progress=child_progress,

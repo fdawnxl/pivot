@@ -40,7 +40,7 @@ def test_dbus_control_only_exposes_framework_and_stimulus_operations(tmp_path: P
             interface = proxy.get_interface(CONTROL_DBUS_INTERFACE)
             assert await interface.call_ping() == "pivot"
             runtime = json.loads(await interface.call_get_runtime())
-            assert runtime["main_agent_id"] == client.main_agent().agent_id
+            assert runtime["main_agent_id"] == client.main_agent_id
             methods = {method.name for method in introspection.interfaces[-1].methods}
             assert {"Inject", "GetStimulus", "ListStimuli", "ListOutputs", "RequestShutdown"} <= methods
             assert {"Invoke", "SendMessage", "GetHistory", "GetMainAgent"}.isdisjoint(methods)

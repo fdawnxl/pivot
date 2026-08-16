@@ -192,7 +192,7 @@ class PersistentAgent:
             self._last_active_at = time.time()
         self.memory.update_agent_state(self.agent_id, state.value)
 
-    def activate(
+    def _activate(
         self,
         stimulus: Any,
         *,
@@ -200,6 +200,8 @@ class PersistentAgent:
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
     ) -> str:
+        """Run one finite activation; only framework gateways may call this method."""
+
         try:
             normalized = normalize_content(stimulus)
         except (TypeError, ValueError) as exc:
