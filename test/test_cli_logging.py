@@ -15,9 +15,18 @@ from pivot.dependencies import DependencyState, DependencyStatus
 from pivot.events import EventPool, EventService, EventSupervisor
 from pivot.executors import ExecutorRegistry, ShellExecutor
 from pivot.memory import MemoryStore
-from pivot.models import CapabilityDescriptor, EventDescriptor
+from pivot.models import CapabilityDescriptor, EventDescriptor, Message
 from pivot.runtime import PivotClient, Runtime
-from pivot.tui import AgentItem, AgentMessage, DependencyItem, PIVOT_THEME, PivotApp, PromptEditor, WorkflowView
+from pivot.tui import (
+    AgentItem,
+    AgentMessage,
+    DependencyItem,
+    PIVOT_THEME,
+    PivotApp,
+    PromptEditor,
+    WorkflowView,
+    _visible_messages,
+)
 from pivot.ui import RuntimeSummary, render_banner, safe_endpoint
 
 
@@ -150,6 +159,19 @@ def test_banner_contains_runtime_summary_and_safe_endpoint() -> None:
     assert "secret" not in banner
 
 
+def test_tui_renders_external_stimuli_without_device_specific_assumptions() -> None:
+    messages = [
+        Message(
+            "system",
+            'pivot stimulus:\n{"kind":"observation","source":"instance.sensor",'
+            '"payload":{"event":"temperature.high","value":83}}',
+        )
+    ]
+    assert list(_visible_messages(messages)) == [
+        ("notice", 'OBSERVATION · instance.sensor\n{"event":"temperature.high","value":83}')
+    ]
+
+
 @pytest.mark.asyncio
 async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) -> None:
     class ToolLLM:
@@ -280,8 +302,8 @@ def test_pivot_client_exposes_only_persistent_main_agent(tmp_path: Path) -> None
     try:
         main = client.main_agent()
         assert client.main_agent() is main
-        operation_names = {item.name for item in client.control.operations()}
-        assert {"agent.main", "agent.message", "agent.create", "agent.assign", "agent.delegate"} <= operation_names
+        assert not hasattr(client.control, "submit")
+        assert not hasattr(client.control, "operations")
         assert client.run_main("hello") == "ack"
     finally:
         client.close()

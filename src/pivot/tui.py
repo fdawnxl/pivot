@@ -23,6 +23,7 @@ from .models import Message
 from .runtime import PivotClient
 from .activation import ActivationProgress, AgentCancelled, CancellationToken, PersistentAgent
 from .ui import safe_endpoint
+from .stimuli import StimulusState
 
 LOGGER = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ class TurnState:
     done: bool = False
     interrupted: bool = False
     error: str | None = None
+    stimulus_id: str | None = None
 
 
 class WorkflowView(Vertical):
@@ -630,16 +632,17 @@ class PivotApp(App[None]):
         if event == "shutdown_requested":
             self.exit()
             return
-        agent_id = payload.get("agent_id")
+        agent_id = payload.get("target_agent_id")
         if (
-            event == "task_changed"
-            and payload.get("operation") == "agent.message"
+            event == "stimulus_changed"
+            and payload.get("state") in {"completed", "failed", "cancelled"}
         ):
             self._schedule_agent_refresh()
+            correlation_id = payload.get("correlation_id")
             if (
-                payload.get("state") in {"completed", "failed", "cancelled"}
-                and agent_id == self.main_agent.agent_id
+                agent_id == self.main_agent.agent_id
                 and agent_id not in self.agent_activations
+                and correlation_id not in self.turns
             ):
                 self.call_later(self._show_main_agent, focus_prompt=False)
 
@@ -703,11 +706,23 @@ class PivotApp(App[None]):
                 LOGGER.debug("TUI closed before progress delivery agent_id=%s", turn.agent_id)
 
         try:
-            response = self.client.run_main(
-                turn.prompt,
+            stimulus_id = self.client.inject(
+                {
+                    "kind": "command",
+                    "source": "tui",
+                    "payload": {"content": turn.prompt},
+                    "correlation_id": turn.turn_id,
+                },
                 progress=progress,
                 cancellation=turn.cancellation,
             )
+            turn.stimulus_id = stimulus_id
+            completed = self.client.wait_stimulus(stimulus_id)
+            if completed.state == StimulusState.CANCELLED:
+                raise AgentCancelled(completed.error or "Stimulus was cancelled")
+            if completed.state == StimulusState.FAILED:
+                raise RuntimeError(completed.error or "Stimulus failed")
+            response = completed.response or ""
         except AgentCancelled:
             try:
                 self.call_from_thread(self._finish_turn, turn.turn_id, None, None, True)
@@ -1075,6 +1090,8 @@ class PivotApp(App[None]):
             self.notify("Interruption is already pending.")
             return
         turn.cancellation.cancel()
+        if turn.stimulus_id is not None:
+            self.client.control.cancel_stimulus(turn.stimulus_id)
         turn.status = "Stopping at the next safe point"
         self._refresh_workflow(turn)
         self.notify("Interruption requested.", severity="warning")
@@ -1112,6 +1129,20 @@ def _visible_messages(messages: Iterable[Message]) -> Iterable[tuple[str, str]]:
     for message in messages:
         if message.role == "user" and message.content:
             yield "user", _display_content(message.content)
+        elif (
+            message.role == "system"
+            and isinstance(message.content, str)
+            and message.content.startswith("pivot stimulus:\n")
+        ):
+            try:
+                stimulus = json.loads(message.content.split("\n", 1)[1])
+            except (json.JSONDecodeError, IndexError):
+                yield "notice", message.content
+            else:
+                kind = str(stimulus.get("kind", "stimulus")).upper()
+                source = str(stimulus.get("source", "unknown"))
+                payload = _summarize(stimulus.get("payload", {}), limit=240)
+                yield "notice", f"{kind} · {source}\n{payload}"
         elif message.role == "assistant" and not message.tool_calls:
             yield "assistant", _display_content(message.content)
 
