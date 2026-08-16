@@ -16,7 +16,7 @@ from typing import Any, TextIO
 
 _HANDLER_MARKER = "_pivot_handler"
 _LEVEL_ALIASES = {"WARN": "WARNING"}
-_LOG_CONTEXT: ContextVar[dict[str, str]] = ContextVar("pivot_log_context", default={})
+_LOG_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar("pivot_log_context", default=None)
 _STANDARD_RECORD_FIELDS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
 _DEPENDENCY_LOGGERS = (
     "LiteLLM",
@@ -33,7 +33,7 @@ _DEPENDENCY_LOGGERS = (
 def log_context(**values: str | None) -> Iterator[None]:
     """Bind correlation fields to all logs emitted in the current context."""
 
-    current = dict(_LOG_CONTEXT.get())
+    current = dict(_LOG_CONTEXT.get() or {})
     current.update({key: value for key, value in values.items() if value is not None})
     token = _LOG_CONTEXT.set(current)
     try:
@@ -46,7 +46,7 @@ class ContextFilter(logging.Filter):
     """Copy context variables onto each log record."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        for key, value in _LOG_CONTEXT.get().items():
+        for key, value in (_LOG_CONTEXT.get() or {}).items():
             if not hasattr(record, key):
                 setattr(record, key, value)
         return True

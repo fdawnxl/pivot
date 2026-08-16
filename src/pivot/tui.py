@@ -1125,10 +1125,10 @@ class PivotApp(App[None]):
 def run_tui(client: PivotClient, *, show_welcome: bool = True) -> bool:
     """Run the TUI and report whether the host should rebuild the runtime."""
 
-    LOGGER.info("Textual interface started agent_id=%s", agent.agent_id)
+    LOGGER.info("Textual interface started agent_id=%s", client.main_agent_id)
     app = PivotApp(client, show_welcome=show_welcome)
     app.run()
-    LOGGER.info("Textual interface stopped agent_id=%s", agent.agent_id)
+    LOGGER.info("Textual interface stopped agent_id=%s", client.main_agent_id)
     return app.reload_requested
 
 

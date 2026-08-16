@@ -117,8 +117,9 @@ Long event waits belong to delegated workers. The persistent main Agent does not
 
 Memory is not an unbounded prompt transcript. Every activation and message is appended to `memory/pivot.db`; prompt construction selects only a bounded recent window, retrieves relevant sourced memories, and injects non-expired world state. Runtime capability/event/control descriptions are rebuilt on every model round, so old environment snapshots are never replayed as durable messages. Long-term records use `fact`, `preference`, `episode`, or `procedure` kinds with confidence, validity, source, sensitivity, and supersession metadata. See [the memory model](doc/memory.md).
 
-Run the test suite with:
+Run the test suite and static checks with:
 
 ```bash
-uv run --extra dev pytest
+uv run pytest
+uv run ruff check src test
 ```

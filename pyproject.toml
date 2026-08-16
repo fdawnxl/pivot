@@ -11,8 +11,8 @@ dependencies = [
     "tomli-w>=1.1",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.12"]
 
 [project.scripts]
 pivot = "pivot.cli:main"
@@ -28,3 +28,12 @@ packages = ["src/pivot"]
 testpaths = ["test"]
 pythonpath = ["src"]
 addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/pivot/dbus_control.py" = ["F821"]
