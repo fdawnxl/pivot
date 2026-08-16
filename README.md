@@ -1,125 +1,152 @@
 # pivot
 
-pivot is a layered agent runtime for edge devices, industrial control and embodied systems. It keeps model access, response parsing, capability execution, events, memory and agent activation replaceable through small Python interfaces.
+**A layered Agent runtime for intelligent terminals, industrial controllers, and embodied systems.**
+
+pivot gives one persistent main Agent a durable inbox, bounded memory, isolated device capabilities, event-driven workers, and a narrow control plane. Device code stays in an explicit **instance**, while the framework remains provider-neutral and replaceable.
+
+```text
+device I/O -> stimulus inbox -> main Agent -> capabilities / workers
+                    |               |
+                    +-> SQLite <-----+
+                            |
+                       durable outputs -> device I/O
+```
+
+## Why pivot
+
+| Need | pivot's boundary |
+| --- | --- |
+| Connect sensors and actuators | Isolated `measure` and `work` capability scripts |
+| Add domain reasoning | Lazy `think` capabilities |
+| React to changing conditions | Shared event polling, edge waits, and durable bridges |
+| Keep the device responsive | One main Agent with asynchronous scoped workers |
+| Survive client disconnects | SQLite stimuli, outputs, task state, and sequence cursors |
+| Integrate voice or device buses | Transport-neutral envelopes plus optional D-Bus control |
+| Replace model providers | A provider-neutral LLM and response boundary over LiteLLM |
 
 ## Quick start
 
-The instance is deliberately explicit. Set `PIVOT_INSTANCE_PATH` (or pass `--instance`) and let uv create the project environment. Omit the message to start the interactive main-agent interface:
+Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and an OpenAI-compatible or LiteLLM-supported model.
 
-```bash
-uv sync --extra dev
-PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot
-PIVOT_INSTANCE_PATH=/path/to/instance uv run pivot "Hello"
-```
-
-The interactive CLI is a Textual application centered on one persistent main agent. The user always talks to that main agent; it either solves the request directly or creates a worker with an explicit capability and event scope. The agent sidebar shows delegated workers and their lifecycle without turning them into user-selectable timelines. Each trace groups model phases, capability calls, event waits, executor calls, control operations, worker reports, and result-integration rounds without exposing hidden chain-of-thought.
-
-An instance is owned by exactly one runtime process at a time. Pivot acquires an exclusive `runtime.lock` before starting dependencies and releases it at shutdown, preventing multiple local processes from controlling the same device state concurrently.
-
-While a CLI process is running, pivot exports a narrow framework control surface on the session D-Bus as `org.pivot.Control` at `/org/pivot/Control`. Instance adapters inject typed stimulus envelopes and consume transport-neutral outputs; they cannot remotely execute capabilities, manage workers, or bypass the main Agent. Framework operations are limited to status, stimulus inspection/cancellation, interruption, reload requests, and shutdown. Run a headless persistent reactor with `uv run pivot --dbus-only`, or disable export with `--no-dbus`. See [the stimulus protocol](doc/stimuli.md) and [D-Bus control protocol](doc/control-dbus.md).
-
-Press `Enter` to send and `Shift+Enter` for a new line. Use `Ctrl+B` to toggle the agent sidebar, `Ctrl+G` to interrupt the main agent and its active workers, `Ctrl+L` to return to the prompt, and `Ctrl+Q` to exit. The prompt accepts `/agents`, `/agent`, `/stop`, `/help`, and `/exit`. Interruption is cooperative: event waits and delegated workers stop during safe polling boundaries, while a synchronous model, capability, or executor request stops at its next safe boundary. The same runtime is available through `pivot.PivotClient.run_main` for non-terminal clients.
-
-The main Agent continuously consumes a bounded durable SQLite inbox. Commands, observations, timers, system notices, and worker reports use one `StimulusEnvelope` contract. Priority aging prevents starvation while equal effective priorities retain FIFO order; explicit source-local deduplication keys make adapter retries idempotent. Only inputs marked safe for replay return to the queue after an interrupted runtime.
-
-Wake-word detection, speech recognition, audio capture, TTS, sensor threshold policies, and other device-specific I/O belong to the instance. Pivot provides only the framework envelope and output contracts. Raw observations default to a world-state update without an LLM call; an instance adapter uses `delivery = "activate"` when its attention policy requires main-Agent handling. Output sequences let adapters resume consumption after disconnecting.
-
-The TUI shows the selected provider, model, persistent Agent, capabilities, events, and live dependency health without exposing endpoint credentials. Use `--no-banner` to suppress the welcome details. One-shot requests retain the plain stdout response and stderr runtime summary expected by scripts.
-
-An empty instance is initialized as follows. Existing files are never overwritten:
-
-```text
-instance/
-├── capabilities/{think,measure,work}/
-├── dependencies/<dependency-project>/
-├── environment/{think,measure,work,event}/
-├── events/
-├── logs/pivot.log
-├── memory/pivot.db       # SQLite WAL: agents, stimuli, outputs, activations, memory, tasks and world state
-├── runtime.lock          # exclusive process lease while pivot owns this instance
-├── config.toml
-└── credentials.toml        # named LLM providers, mode 0600
-```
-
-Long-running external programs live in `dependencies`, with one standalone uv project per first-level directory. A valid project declares a stable logical id, an explicit D-Bus bus and service name, and an argv-style start command in `dependency.toml`. Pivot synchronizes its packages only on the first successful start, launches it in its own uv environment, confirms readiness through the common D-Bus status and heartbeat interface, and stops the process when the runtime closes. See [the dependency protocol](doc/dependencies.md) for the manifest and service contract.
-
-LiteLLM is a core dependency and is installed by `uv sync`:
+Install the project:
 
 ```bash
 uv sync
 ```
 
-`credentials.toml` owns complete provider connections and is restricted to mode `0600`:
+Choose an instance directory. pivot creates its base structure without overwriting existing files:
+
+```bash
+export PIVOT_INSTANCE_PATH=/path/to/device-instance
+uv run pivot --no-banner "hello"
+```
+
+The first run may stop after initialization because no provider is configured yet. Add `$PIVOT_INSTANCE_PATH/credentials.toml`:
 
 ```toml
 [providers.local]
 model = "openai/local-model"
 api_base = "http://127.0.0.1:8000/v1"
 api_key = "provider-secret"
-
-[providers.cloud]
-model = "openai/gpt-4o-mini"
-api_key = "provider-secret"
 ```
 
-`config.toml` only selects one provider and configures runtime behavior:
+Restrict it and select the provider:
+
+```bash
+chmod 600 "$PIVOT_INSTANCE_PATH/credentials.toml"
+```
 
 ```toml
+# config.toml
 provider = "local"
-max_rounds = 8
-executor_timeout = 30
-executor_max_output_bytes = 1048576
-dbus_control_enabled = true
-dbus_control_bus = "session"
-dbus_control_service = "org.pivot.Control"
-stimulus_max_pending = 1000
-stimulus_retention_seconds = 604800
-stimulus_priority_aging_seconds = 5
-```
 
-`PIVOT_PROVIDER` overrides the selected provider. Other runtime settings use `PIVOT_<NAME>`, then `config.toml`, then code defaults. Model names, API endpoints, and API keys are read only from `credentials.toml` and are never written to ordinary configuration or logs.
-
-Terminal and persisted log levels are independent. Supported values are `debug`, `info`, `warn` and `error`:
-
-```toml
 [logging]
 display_level = "info"
 storage_level = "debug"
 ```
 
-The corresponding environment variables are `PIVOT_LOG_DISPLAY_LEVEL` and `PIVOT_LOG_STORAGE_LEVEL`. The aliases `log_console_level`/`PIVOT_LOG_CONSOLE_LEVEL` and `log_file_level`/`PIVOT_LOG_FILE_LEVEL` are also accepted. Files rotate at 5 MiB and retain three backups. Terminal logs remain human-readable; persisted logs use JSON Lines and include `correlation_id`, `activation_id`, and `agent_id` when available.
-
-## Architecture
-
-`pivot.config` bootstraps an instance; `pivot.logging` configures output; `pivot.dependencies` manages external uv projects; `pivot.llm` wraps LiteLLM; `pivot.parser` extracts provider responses; `pivot.memory.RuntimeStore` owns the database and schema; `pivot.stimuli` provides inbox/output repositories and the main-Agent reactor; `pivot.actions` normalizes model actions; `pivot.capabilities` dispatches `think`, `measure` and `work`; `pivot.executors` performs concrete execution; `pivot.events` owns condition waits and the Event-to-Stimulus bridge; `pivot.agents` owns worker control; and `pivot.activation` runs internal finite model/action activations. External Python clients use `PivotClient.inject` or the command convenience `run_main`; no mutable main Agent is exposed.
-
-The preferred model operation is the single `pivot_action` tool with `{kind, name, arguments}`. The same detector accepts a textual fallback in the form `<pivot-action>{JSON}</pivot-action>`. Capability calls, event waits, framework control, executor requests, and memory operations all pass through this normalized route. Provider-native capability and event tools are normalized through the same router. See [agent control, actions, and executors](doc/agent-control.md) for the operation contract.
-
-The built-in `shell` executor runs through `/bin/sh` in the explicit instance directory with a restricted environment, configured timeout, and bounded stdout/stderr. It is an execution mechanism rather than a work methodology. It does not provide an operating-system security sandbox.
-
-Instance capability scripts are never imported by the pivot process. They use dedicated uv environments and JSON command protocols:
-
-```text
-think:   -l -> descriptor, -r -> full triple-quoted capability text
-measure: -l -> descriptor, -r <feature> -> measured JSON value
-work:    -l -> descriptor, -x + JSON stdin -> JSON execution result
-```
-
-Messages may contain either text or provider-compatible content-part arrays. A capability can return
-`{"content": [...]}` to attach image, audio, or video parts to its tool result; pivot preserves those parts through
-the following model round and SQLite message history without interpreting the media payload.
-
-Think descriptors are injected lazily. The model sees their names and summaries at first, then calls the built-in `pivot_read_think` tool only when it needs the full text. Work processes use a fixed instance directory, a restricted environment, a timeout, and an output limit. This is process isolation intended to protect the pivot interpreter; deployments executing hostile commands should add an operating-system sandbox.
-
-Events are generic monitored fields rather than fixed thresholds. An event descriptor advertises a field and supported operators. A worker calls `pivot_wait_event` with the chosen operator, expected value, and timeout. A matching value, timeout, or isolated source error is formatted with the event's injection template, appended as a tool result, and resumes that worker activation. Optional rules in `events/bridges.toml` convert persistent rising-edge conditions into durable main-Agent observation stimuli without exposing device protocols to the framework. See [the event runtime](doc/events.md).
-
-Long event waits belong to delegated workers. The persistent main Agent does not advertise the native wait tool, and direct waits longer than one second are rejected with guidance to delegate. Worker completion, failure, or cancellation is delivered later as a typed `worker_report` stimulus. Instance event adapters publish `observation` stimuli for autonomous device monitoring.
-
-Memory is not an unbounded prompt transcript. Every activation and message is appended to `memory/pivot.db`; prompt construction selects only a bounded recent window, retrieves relevant sourced memories, and injects non-expired world state. Runtime capability/event/control descriptions are rebuilt on every model round, so old environment snapshots are never replayed as durable messages. Long-term records use `fact`, `preference`, `episode`, or `procedure` kinds with confidence, validity, source, sensitivity, and supersession metadata. See [the memory model](doc/memory.md).
-
-Run the test suite and static checks with:
+Start the interactive terminal:
 
 ```bash
+uv run pivot
+```
+
+Or send one command:
+
+```bash
+uv run pivot "What can you observe?"
+```
+
+Use `--instance /path/to/instance` instead of `PIVOT_INSTANCE_PATH` when preferred. Run `uv run pivot --dbus-only` for a headless device service.
+
+## The instance boundary
+
+An instance contains everything specific to one deployment:
+
+```text
+instance/
+├── capabilities/{think,measure,work}/   short isolated extensions
+├── dependencies/<project>/              long-running device services
+├── environment/{think,measure,work,event}/
+├── events/                               monitored fields and bridge rules
+├── memory/pivot.db                       Agents, stimuli, outputs, memory
+├── logs/                                 runtime and dependency diagnostics
+├── config.toml                           non-secret runtime settings
+└── credentials.toml                      named providers, mode 0600
+```
+
+The framework does not implement wake words, ASR, TTS, camera capture, sensor drivers, or display rendering. Those belong to instance capabilities, dependencies, event sources, and adapters.
+
+A typical intelligent terminal uses:
+
+1. a dependency to own long-lived hardware connections;
+2. measure capabilities for on-demand facts;
+3. work capabilities for bounded physical actions;
+4. event sources and bridges for autonomous attention;
+5. an adapter that turns voice, buttons, or network messages into stimuli and consumes durable outputs.
+
+## Core model
+
+- The user and every external adapter address one stable main Agent.
+- Every input enters a bounded, durable `StimulusEnvelope` queue.
+- Each activation rebuilds current context from scoped tools, recent history, memory, and world state.
+- Workers receive explicit capability and event allowlists.
+- Worker reports return as stimuli, so the main Agent remains the only user-facing authority.
+- State observations can refresh context without invoking an LLM.
+- Outputs carry monotonic sequence numbers for disconnect recovery.
+
+One process exclusively owns an instance. This protects dependency lifecycle, the main Agent, and writable state from concurrent local runtimes.
+
+## Documentation
+
+The [documentation index](doc/README.md) has two focused paths:
+
+### Understand and extend pivot
+
+- [Architecture](doc/framework/architecture.md)
+- [Runtime and extension boundaries](doc/framework/runtime.md)
+- [Agents and activations](doc/framework/agents.md)
+- [Persistence and stimuli](doc/framework/persistence.md)
+- [Event system](doc/framework/events.md)
+- [Control and presentation](doc/framework/control.md)
+
+### Build an intelligent-terminal instance
+
+- [Build a minimal instance](doc/instance/getting-started.md)
+- [Configure the instance](doc/instance/configuration.md)
+- [Develop capabilities](doc/instance/capabilities.md)
+- [Connect events and dependencies](doc/instance/events-and-dependencies.md)
+- [Implement adapters and deploy](doc/instance/adapters-and-deployment.md)
+
+## Development
+
+```bash
+uv sync --group dev
 uv run pytest
 uv run ruff check src test
+uv run ruff format --check src test
 ```
+
+The built-in shell executor has a fixed instance cwd, environment allowlist, timeout, and output cap, but it is not an operating-system sandbox. Add an OS-level isolation policy before executing commands that are not fully trusted.
+
+Licensed under the [MIT License](LICENSE).
