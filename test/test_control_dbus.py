@@ -8,14 +8,18 @@ import time
 from pathlib import Path
 
 import pytest
+from test_control import _runtime
 
 from pivot.dbus_control import CONTROL_DBUS_INTERFACE, CONTROL_DBUS_PATH
 from pivot.runtime import PivotClient
-from test_control import _runtime
 
 
-@pytest.mark.skipif(shutil.which("dbus-daemon") is None, reason="dbus-daemon is unavailable")
-def test_dbus_control_only_exposes_framework_and_stimulus_operations(tmp_path: Path) -> None:
+@pytest.mark.skipif(
+    shutil.which("dbus-daemon") is None, reason="dbus-daemon is unavailable"
+)
+def test_dbus_control_only_exposes_framework_and_stimulus_operations(
+    tmp_path: Path,
+) -> None:
     bus_process = subprocess.Popen(
         ["dbus-daemon", "--session", "--nofork", "--print-address=1"],
         stdout=subprocess.PIPE,
@@ -42,8 +46,22 @@ def test_dbus_control_only_exposes_framework_and_stimulus_operations(tmp_path: P
             runtime = json.loads(await interface.call_get_runtime())
             assert runtime["main_agent_id"] == client.main_agent_id
             methods = {method.name for method in introspection.interfaces[-1].methods}
-            assert {"Inject", "GetStimulus", "ListStimuli", "ListOutputs", "RequestShutdown"} <= methods
-            assert {"Invoke", "SendMessage", "GetHistory", "GetMainAgent"}.isdisjoint(methods)
+            assert {
+                "Inject",
+                "GetStimulus",
+                "ListStimuli",
+                "ListOutputs",
+                "RequestShutdown",
+            } <= methods
+            assert {"Invoke", "SendMessage", "GetHistory", "GetMainAgent"}.isdisjoint(
+                methods
+            )
+            runtime_events: list[tuple[str, dict[str, object]]] = []
+            interface.on_runtime_event(
+                lambda event, payload: runtime_events.append(
+                    (event, json.loads(payload))
+                )
+            )
 
             stimulus_id = await interface.call_inject(
                 json.dumps(
@@ -64,6 +82,13 @@ def test_dbus_control_only_exposes_framework_and_stimulus_operations(tmp_path: P
             assert stimulus["response"] == "ack: remote"
             outputs = json.loads(await interface.call_list_outputs(0, 10))
             assert outputs[0]["stimulus_id"] == stimulus_id
+            progress = [
+                payload
+                for event, payload in runtime_events
+                if event == "activation_progress"
+            ]
+            assert any(item["kind"] == "activation_started" for item in progress)
+            assert any(item["kind"] == "activation_completed" for item in progress)
         finally:
             bus.disconnect()
 

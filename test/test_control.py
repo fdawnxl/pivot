@@ -13,7 +13,13 @@ from pivot.capabilities import CapabilityRegistry
 from pivot.config import PivotConfig
 from pivot.control import PivotControl
 from pivot.credentials import ProviderCredential
-from pivot.events import EventBridgeRule, EventPool, EventService, EventStimulusBridge, EventSupervisor
+from pivot.events import (
+    EventBridgeRule,
+    EventPool,
+    EventService,
+    EventStimulusBridge,
+    EventSupervisor,
+)
 from pivot.executors import ExecutorRegistry, ShellExecutor
 from pivot.memory import RuntimeStore
 from pivot.models import EventDescriptor
@@ -23,7 +29,11 @@ from pivot.stimuli import StimulusState
 
 class EchoLLM:
     def complete(self, messages, *, tools=()):
-        stimulus = next(message.content for message in reversed(messages) if message.role in {"user", "system"})
+        stimulus = next(
+            message.content
+            for message in reversed(messages)
+            if message.role in {"user", "system"}
+        )
         return {"choices": [{"message": {"content": f"ack: {stimulus}"}}]}
 
 
@@ -55,13 +65,17 @@ def _runtime(tmp_path: Path, llm: Any | None = None) -> Runtime:
         executors=executors,
         max_rounds=4,
     )
-    return Runtime(config, registry, events, event_service, memory, main, None, executors, agents)
+    return Runtime(
+        config, registry, events, event_service, memory, main, None, executors, agents
+    )
 
 
 def test_control_injects_durable_envelopes_and_emits_outputs(tmp_path: Path) -> None:
     control = PivotControl(_runtime(tmp_path))
     events: list[tuple[str, str]] = []
-    control.subscribe(lambda event, payload: events.append((event, str(payload.get("state", "")))))
+    control.subscribe(
+        lambda event, payload: events.append((event, str(payload.get("state", ""))))
+    )
 
     stimulus_id = control.inject(
         {
@@ -75,14 +89,48 @@ def test_control_injects_durable_envelopes_and_emits_outputs(tmp_path: Path) -> 
     assert stimulus.state == StimulusState.COMPLETED
     assert stimulus.response == "ack: hello"
     assert stimulus.activation_id is not None
-    assert [message.role for message in control.runtime._main_agent.history] == ["user", "assistant"]
+    assert [message.role for message in control.runtime._main_agent.history] == [
+        "user",
+        "assistant",
+    ]
     output = control.outputs()[0]
     assert output.stimulus_id == stimulus_id
     assert output.payload["content"] == "ack: hello"
-    assert any(event == "stimulus_changed" and state == "completed" for event, state in events)
+    assert any(
+        event == "stimulus_changed" and state == "completed" for event, state in events
+    )
     assert any(event == "output_available" for event, _state in events)
     control.close()
     control.runtime.close()
+
+
+def test_runtime_snapshot_exposes_sanitized_agent_collaboration_state(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    control = PivotControl(runtime)
+    try:
+        snapshot = control.runtime_snapshot()
+        assert snapshot["agents"] == [
+            {
+                "agent_id": runtime._main_agent.agent_id,
+                "name": "main",
+                "role": "main",
+                "parent_id": None,
+                "state": "ready",
+                "task": None,
+                "task_id": None,
+                "one_shot": False,
+                "capability_count": 0,
+                "event_count": 0,
+                "report_available": False,
+                "error": None,
+                "updated_at": snapshot["agents"][0]["updated_at"],
+            }
+        ]
+    finally:
+        control.close()
+        runtime.close()
 
 
 def test_runtime_close_releases_every_component_after_failure(tmp_path: Path) -> None:
@@ -106,7 +154,9 @@ def test_runtime_close_releases_every_component_after_failure(tmp_path: Path) ->
     with pytest.raises(ExceptionGroup, match="Unable to close runtime") as captured:
         runtime.close()
 
-    assert [str(error) for error in captured.value.exceptions] == ["bridge close failed"]
+    assert [str(error) for error in captured.value.exceptions] == [
+        "bridge close failed"
+    ]
     assert released == [True]
     assert not runtime.event_service.supervisor.running
     assert runtime.memory._closed
@@ -121,7 +171,9 @@ def test_client_close_releases_runtime_when_dbus_stop_fails(tmp_path: Path) -> N
             raise RuntimeError("D-Bus stop failed")
 
     client._dbus_service = BrokenDBusService()
-    with pytest.raises(ExceptionGroup, match="Unable to close pivot client") as captured:
+    with pytest.raises(
+        ExceptionGroup, match="Unable to close pivot client"
+    ) as captured:
         client.close()
 
     assert [str(error) for error in captured.value.exceptions] == ["D-Bus stop failed"]
@@ -130,7 +182,9 @@ def test_client_close_releases_runtime_when_dbus_stop_fails(tmp_path: Path) -> N
     client.close()
 
 
-def test_event_bridge_persists_occurrence_and_routes_through_main_inbox(tmp_path: Path) -> None:
+def test_event_bridge_persists_occurrence_and_routes_through_main_inbox(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime(tmp_path)
     runtime.events.register(
         EventDescriptor(
@@ -144,7 +198,11 @@ def test_event_bridge_persists_occurrence_and_routes_through_main_inbox(tmp_path
     control = PivotControl(runtime)
     assert runtime.reactor is not None
     bridge = EventStimulusBridge(
-        (EventBridgeRule("temperature-alert", "monitor_temperature", ">", 40, "state", 80, True),),
+        (
+            EventBridgeRule(
+                "temperature-alert", "monitor_temperature", ">", 40, "state", 80, True
+            ),
+        ),
         supervisor=runtime.event_service.supervisor,
         store=runtime.memory,
         publish=runtime.reactor.inject_event_occurrence,
@@ -194,14 +252,20 @@ def test_control_interrupts_local_main_activation(tmp_path: Path) -> None:
     client.close()
 
 
-def test_main_agent_stimuli_preserve_fifo_and_skip_cancelled_items(tmp_path: Path) -> None:
+def test_main_agent_stimuli_preserve_fifo_and_skip_cancelled_items(
+    tmp_path: Path,
+) -> None:
     first_started = threading.Event()
     release_first = threading.Event()
     received: list[str] = []
 
     class OrderedLLM:
         def complete(self, messages, *, tools=()):
-            value = next(message.content for message in reversed(messages) if message.role == "user")
+            value = next(
+                message.content
+                for message in reversed(messages)
+                if message.role == "user"
+            )
             assert isinstance(value, str)
             received.append(value)
             if value == "first":
@@ -255,7 +319,9 @@ def test_observation_uses_the_same_main_agent_reactor(tmp_path: Path) -> None:
     control.runtime.close()
 
 
-def test_observation_defaults_to_world_state_without_llm_activation(tmp_path: Path) -> None:
+def test_observation_defaults_to_world_state_without_llm_activation(
+    tmp_path: Path,
+) -> None:
     control = PivotControl(_runtime(tmp_path))
     stimulus_id = control.inject(
         {

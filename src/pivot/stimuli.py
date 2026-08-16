@@ -13,7 +13,13 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from .activation import ActivationProgress, AgentCancelled, CancellationToken, PersistentAgent, ProgressCallback
+from .activation import (
+    ActivationProgress,
+    AgentCancelled,
+    CancellationToken,
+    PersistentAgent,
+    ProgressCallback,
+)
 from .agents import AgentControl, AgentRecord
 from .memory import RuntimeStore
 from .models import normalize_content
@@ -64,7 +70,11 @@ _DEFAULT_DELIVERY = {
     StimulusKind.TIMER: StimulusDelivery.ACTIVATE,
     StimulusKind.SYSTEM: StimulusDelivery.ACTIVATE,
 }
-_TERMINAL_STATES = {StimulusState.COMPLETED, StimulusState.FAILED, StimulusState.CANCELLED}
+_TERMINAL_STATES = {
+    StimulusState.COMPLETED,
+    StimulusState.FAILED,
+    StimulusState.CANCELLED,
+}
 _MAX_ENVELOPE_BYTES = 1024 * 1024
 
 
@@ -91,7 +101,9 @@ class StimulusEnvelope:
     error: str | None = None
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any], *, target_agent_id: str) -> "StimulusEnvelope":
+    def from_mapping(
+        cls, value: Mapping[str, Any], *, target_agent_id: str
+    ) -> "StimulusEnvelope":
         """Validate an untrusted adapter envelope and bind it to the main agent."""
 
         allowed = {
@@ -108,14 +120,23 @@ class StimulusEnvelope:
         }
         unknown = set(value) - allowed
         if unknown:
-            raise StimulusError(f"Unknown stimulus fields: {', '.join(sorted(unknown))}")
+            raise StimulusError(
+                f"Unknown stimulus fields: {', '.join(sorted(unknown))}"
+            )
         try:
             kind = StimulusKind(value.get("kind"))
         except (TypeError, ValueError) as exc:
             raise StimulusError("Stimulus kind is invalid") from exc
         source = value.get("source")
-        if not isinstance(source, str) or not source.strip() or len(source) > 256 or "\x00" in source:
-            raise StimulusError("Stimulus source must be a non-empty string of at most 256 characters")
+        if (
+            not isinstance(source, str)
+            or not source.strip()
+            or len(source) > 256
+            or "\x00" in source
+        ):
+            raise StimulusError(
+                "Stimulus source must be a non-empty string of at most 256 characters"
+            )
         payload = value.get("payload")
         if not isinstance(payload, Mapping):
             raise StimulusError("Stimulus payload must be a JSON object")
@@ -127,18 +148,34 @@ class StimulusEnvelope:
                 normalized = normalize_content(payload_value["content"])
             except (TypeError, ValueError) as exc:
                 raise StimulusError(f"Command content is invalid: {exc}") from exc
-            payload_value["content"] = list(normalized) if isinstance(normalized, tuple) else normalized
+            payload_value["content"] = (
+                list(normalized) if isinstance(normalized, tuple) else normalized
+            )
         priority = value.get("priority", _DEFAULT_PRIORITIES[kind])
-        if not isinstance(priority, int) or isinstance(priority, bool) or not -100 <= priority <= 100:
-            raise StimulusError("Stimulus priority must be an integer between -100 and 100")
+        if (
+            not isinstance(priority, int)
+            or isinstance(priority, bool)
+            or not -100 <= priority <= 100
+        ):
+            raise StimulusError(
+                "Stimulus priority must be an integer between -100 and 100"
+            )
         try:
             delivery = StimulusDelivery(value.get("delivery", _DEFAULT_DELIVERY[kind]))
         except (TypeError, ValueError) as exc:
-            raise StimulusError("Stimulus delivery must be 'activate' or 'state'") from exc
+            raise StimulusError(
+                "Stimulus delivery must be 'activate' or 'state'"
+            ) from exc
         if delivery == StimulusDelivery.STATE:
             values = payload_value.get("values")
-            if kind != StimulusKind.OBSERVATION or not isinstance(values, Mapping) or not values:
-                raise StimulusError("State delivery requires an observation payload.values object")
+            if (
+                kind != StimulusKind.OBSERVATION
+                or not isinstance(values, Mapping)
+                or not values
+            ):
+                raise StimulusError(
+                    "State delivery requires an observation payload.values object"
+                )
             ttl = payload_value.get("ttl")
             if ttl is not None and (
                 not isinstance(ttl, (int, float)) or isinstance(ttl, bool) or ttl <= 0
@@ -147,8 +184,12 @@ class StimulusEnvelope:
         replay_safe = value.get("replay_safe", delivery == StimulusDelivery.STATE)
         if not isinstance(replay_safe, bool):
             raise StimulusError("Stimulus replay_safe must be a boolean")
-        stimulus_id = _optional_uuid(value.get("stimulus_id"), "stimulus_id") or str(uuid4())
-        correlation_id = _optional_identifier(value.get("correlation_id"), "correlation_id")
+        stimulus_id = _optional_uuid(value.get("stimulus_id"), "stimulus_id") or str(
+            uuid4()
+        )
+        correlation_id = _optional_identifier(
+            value.get("correlation_id"), "correlation_id"
+        )
         causation_id = _optional_identifier(value.get("causation_id"), "causation_id")
         dedupe_key = _optional_identifier(value.get("dedupe_key"), "dedupe_key")
         envelope = cls(
@@ -166,7 +207,9 @@ class StimulusEnvelope:
             dedupe_key,
         )
         if len(_json(envelope.as_dict()).encode("utf-8")) > _MAX_ENVELOPE_BYTES:
-            raise StimulusError(f"Stimulus envelope exceeds {_MAX_ENVELOPE_BYTES} bytes")
+            raise StimulusError(
+                f"Stimulus envelope exceeds {_MAX_ENVELOPE_BYTES} bytes"
+            )
         return envelope
 
     def activation_content(self) -> Any:
@@ -266,7 +309,10 @@ class StimulusInbox:
             )
             self._connection.execute(
                 "UPDATE stimuli SET state = 'failed', error = ?, updated_at = ? WHERE state = 'processing' AND replay_safe = 0",
-                ("Runtime stopped during an unsafe stimulus; automatic replay was refused", time.time()),
+                (
+                    "Runtime stopped during an unsafe stimulus; automatic replay was refused",
+                    time.time(),
+                ),
             )
 
     def enqueue(
@@ -314,7 +360,9 @@ class StimulusInbox:
                 "SELECT count(*) FROM stimuli WHERE state IN ('queued', 'processing')"
             ).fetchone()[0]
             if int(pending) >= self.max_pending:
-                raise StimulusError(f"Stimulus inbox is full ({self.max_pending} pending)")
+                raise StimulusError(
+                    f"Stimulus inbox is full ({self.max_pending} pending)"
+                )
             try:
                 self._connection.execute(
                     """INSERT INTO stimuli(
@@ -340,7 +388,9 @@ class StimulusInbox:
             except sqlite3.IntegrityError as exc:
                 existing = self._find_existing(envelope)
                 if existing is None:
-                    raise StimulusError("Stimulus id conflicts with an existing envelope") from exc
+                    raise StimulusError(
+                        "Stimulus id conflicts with an existing envelope"
+                    ) from exc
                 return existing, False
             if occurrence_values is not None:
                 try:
@@ -361,7 +411,9 @@ class StimulusInbox:
                         occurrence_state_values,
                     )
                 except sqlite3.IntegrityError as exc:
-                    raise StimulusError("Event occurrence conflicts with an existing record") from exc
+                    raise StimulusError(
+                        "Event occurrence conflicts with an existing record"
+                    ) from exc
             self._condition.notify_all()
         return envelope, True
 
@@ -451,11 +503,14 @@ class StimulusInbox:
         limit = min(max(limit, 1), 1000)
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM stimuli ORDER BY created_at DESC, stimulus_id DESC LIMIT ?", (limit,)
+                "SELECT * FROM stimuli ORDER BY created_at DESC, stimulus_id DESC LIMIT ?",
+                (limit,),
             ).fetchall()
         return tuple(_row_stimulus(row) for row in rows)
 
-    def wait(self, stimulus_id: str, *, timeout: float | None = None) -> StimulusEnvelope:
+    def wait(
+        self, stimulus_id: str, *, timeout: float | None = None
+    ) -> StimulusEnvelope:
         deadline = time.monotonic() + timeout if timeout is not None else None
         with self._condition:
             while True:
@@ -466,7 +521,9 @@ class StimulusInbox:
                 ):
                     return envelope
                 if self._closed:
-                    raise StimulusError("Stimulus inbox closed before processing completed")
+                    raise StimulusError(
+                        "Stimulus inbox closed before processing completed"
+                    )
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     raise TimeoutError(f"Timed out waiting for stimulus {stimulus_id}")
@@ -491,7 +548,9 @@ class StimulusInbox:
             self._condition.notify_all()
         return replace(output, sequence=int(cursor.lastrowid))
 
-    def outputs(self, *, after_sequence: int = 0, limit: int = 100) -> tuple[OutputEnvelope, ...]:
+    def outputs(
+        self, *, after_sequence: int = 0, limit: int = 100
+    ) -> tuple[OutputEnvelope, ...]:
         if after_sequence < 0:
             raise ValueError("Output cursor must not be negative")
         limit = min(max(limit, 1), 1000)
@@ -559,7 +618,9 @@ class StimulusInbox:
                 or existing.causation_id != envelope.causation_id
                 or existing.dedupe_key != envelope.dedupe_key
             ):
-                raise StimulusError("Stimulus id conflicts with different envelope content")
+                raise StimulusError(
+                    "Stimulus id conflicts with different envelope content"
+                )
             return existing
         if envelope.dedupe_key is not None:
             row = self._connection.execute(
@@ -587,6 +648,7 @@ class MainAgentReactor:
         self._listeners: set[ReactorListener] = set()
         self._progress: dict[str, ProgressCallback] = {}
         self._tokens: dict[str, CancellationToken] = {}
+        self._delivered_worker_reports: set[tuple[str, str | None, int]] = set()
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -594,8 +656,11 @@ class MainAgentReactor:
     def start(self) -> None:
         if self._thread is not None:
             return
+        self.agents.set_report_handler(self._on_worker_report)
         self.agents.set_completion_handler(self._on_worker_completion)
-        self._thread = threading.Thread(target=self._run, name="pivot-main-reactor", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="pivot-main-reactor", daemon=True
+        )
         self._thread.start()
         LOGGER.info("Main-agent reactor started agent_id=%s", self.main_agent.agent_id)
 
@@ -616,7 +681,9 @@ class MainAgentReactor:
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
     ) -> str:
-        envelope = StimulusEnvelope.from_mapping(value, target_agent_id=self.main_agent.agent_id)
+        envelope = StimulusEnvelope.from_mapping(
+            value, target_agent_id=self.main_agent.agent_id
+        )
         with self._lock:
             if progress is not None:
                 self._progress[envelope.stimulus_id] = progress
@@ -638,14 +705,18 @@ class MainAgentReactor:
     ) -> str:
         """Persist a bridge-generated stimulus and its event occurrence audit link."""
 
-        envelope = StimulusEnvelope.from_mapping(value, target_agent_id=self.main_agent.agent_id)
+        envelope = StimulusEnvelope.from_mapping(
+            value, target_agent_id=self.main_agent.agent_id
+        )
         accepted, created = self.inbox.enqueue(envelope, occurrence=occurrence)
         if not created:
             return accepted.stimulus_id
         self._emit("stimulus_changed", accepted.as_dict())
         return accepted.stimulus_id
 
-    def wait(self, stimulus_id: str, *, timeout: float | None = None) -> StimulusEnvelope:
+    def wait(
+        self, stimulus_id: str, *, timeout: float | None = None
+    ) -> StimulusEnvelope:
         return self.inbox.wait(stimulus_id, timeout=timeout)
 
     def cancel(self, stimulus_id: str) -> bool:
@@ -673,6 +744,7 @@ class MainAgentReactor:
         self._emit(event, payload)
 
     def close(self) -> None:
+        self.agents.set_report_handler(None)
         self.agents.set_completion_handler(None)
         self._stop.set()
         self.interrupt()
@@ -720,7 +792,9 @@ class MainAgentReactor:
         try:
             response = self.main_agent._activate(
                 envelope.activation_content(),
-                source="user" if envelope.kind == StimulusKind.COMMAND else envelope.kind.value,
+                source="user"
+                if envelope.kind == StimulusKind.COMMAND
+                else envelope.kind.value,
                 progress=emit_progress,
                 cancellation=token,
                 started=lambda activation_id: self.inbox.bind_activation(
@@ -753,7 +827,11 @@ class MainAgentReactor:
                 envelope.stimulus_id,
                 self.main_agent.agent_id,
                 "response",
-                {"content": response, "stimulus_kind": envelope.kind.value, "source": envelope.source},
+                {
+                    "content": response,
+                    "stimulus_kind": envelope.kind.value,
+                    "source": envelope.source,
+                },
                 envelope.correlation_id,
             )
             output = self.inbox.append_output(output)
@@ -815,14 +893,41 @@ class MainAgentReactor:
         self.inbox.publish_terminal(envelope.stimulus_id)
 
     def _on_worker_completion(self, record: AgentRecord) -> None:
+        report_key = (record.agent_id, record.task_id, record.report_revision)
+        with self._lock:
+            already_delivered = (
+                record.report_revision > 0
+                and report_key in self._delivered_worker_reports
+            )
+        if already_delivered:
+            return
+        self._inject_worker_report(
+            record, partial=False, revision=record.report_revision
+        )
+
+    def _on_worker_report(self, record: AgentRecord, revision: int) -> None:
+        self._inject_worker_report(record, partial=True, revision=revision)
+        with self._lock:
+            self._delivered_worker_reports.add(
+                (record.agent_id, record.task_id, revision)
+            )
+
+    def _inject_worker_report(
+        self, record: AgentRecord, *, partial: bool, revision: int
+    ) -> None:
         snapshot = record.as_dict()
+        snapshot.update({"partial": partial, "report_revision": revision})
+        task_key = record.task_id or record.agent_id
+        report_key = (
+            f"{task_key}:report:{revision}" if revision else f"{task_key}:final"
+        )
         self.inject(
             {
                 "kind": StimulusKind.WORKER_REPORT,
                 "source": f"agent:{record.agent_id}",
                 "payload": snapshot,
                 "causation_id": record.task_id,
-                "dedupe_key": record.task_id or record.agent_id,
+                "dedupe_key": report_key,
             }
         )
 
@@ -833,7 +938,11 @@ class MainAgentReactor:
             try:
                 listener(event, payload)
             except Exception as exc:
-                LOGGER.warning("Reactor listener failed event=%s error_type=%s", event, type(exc).__name__)
+                LOGGER.warning(
+                    "Reactor listener failed event=%s error_type=%s",
+                    event,
+                    type(exc).__name__,
+                )
 
 
 def _row_stimulus(row: Any) -> StimulusEnvelope:
@@ -885,8 +994,15 @@ def _optional_uuid(value: Any, name: str) -> str | None:
 def _optional_identifier(value: Any, name: str) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip() or len(value) > 256 or "\x00" in value:
-        raise StimulusError(f"Stimulus {name} must be a non-empty string of at most 256 characters")
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > 256
+        or "\x00" in value
+    ):
+        raise StimulusError(
+            f"Stimulus {name} must be a non-empty string of at most 256 characters"
+        )
     return value.strip()
 
 

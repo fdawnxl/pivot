@@ -2,21 +2,53 @@ from pathlib import Path
 
 import pytest
 
-from pivot.capabilities import CapabilityError, CapabilityRegistry, THINK_READER_NAME
+from pivot.capabilities import THINK_READER_NAME, CapabilityError, CapabilityRegistry
 from pivot.capabilities.discovery import register_instance_capabilities
-from pivot.models import CapabilityDescriptor, ToolCall
+from pivot.llm.client import LiteLLMClient
+from pivot.models import CapabilityDescriptor, Message, ToolCall
 from pivot.parser import ResponseParseError, parse_response
 
 
 def test_parse_openai_dict_response() -> None:
-    parsed = parse_response({"choices": [{"message": {"content": "done", "tool_calls": [{"id": "1", "function": {"name": "read_temp", "arguments": '{"unit":"C"}'}}]}}]})
+    parsed = parse_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "done",
+                        "tool_calls": [
+                            {
+                                "id": "1",
+                                "function": {
+                                    "name": "read_temp",
+                                    "arguments": '{"unit":"C"}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
     assert parsed.text == "done"
     assert parsed.tool_calls[0].arguments == {"unit": "C"}
 
 
 def test_parse_rejects_bad_arguments() -> None:
     with pytest.raises(ResponseParseError):
-        parse_response({"choices": [{"message": {"tool_calls": [{"function": {"name": "x", "arguments": "oops"}}]}}]})
+        parse_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {"function": {"name": "x", "arguments": "oops"}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
 
 
 def test_parse_preserves_multimodal_response_content() -> None:
@@ -31,9 +63,45 @@ def test_parse_preserves_multimodal_response_content() -> None:
     assert parsed.content == tuple(content)
 
 
+def test_litellm_moves_tool_media_to_supported_message_role() -> None:
+    captured = {}
+
+    def completion(**kwargs):
+        captured.update(kwargs)
+        return {"choices": [{"message": {"content": "done"}}]}
+
+    client = LiteLLMClient("test-model", completion=completion)
+    client.complete(
+        (
+            Message("assistant", "", tool_calls=(ToolCall("camera", {}, "call-1"),)),
+            Message(
+                "tool",
+                (
+                    {"type": "text", "text": "Camera frame."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64,AA=="},
+                    },
+                ),
+                name="camera",
+                tool_call_id="call-1",
+            ),
+        )
+    )
+
+    sent = captured["messages"]
+    assert [message["role"] for message in sent] == ["assistant", "tool", "user"]
+    assert sent[1]["content"] == [{"type": "text", "text": "Camera frame."}]
+    assert sent[1]["tool_call_id"] == "call-1"
+    assert sent[2]["content"][-1]["type"] == "image_url"
+
+
 def test_registry_dispatch_and_tools() -> None:
     registry = CapabilityRegistry()
-    registry.register(CapabilityDescriptor("add", "work", "Add numbers", {"type": "object"}), lambda a, b: a + b)
+    registry.register(
+        CapabilityDescriptor("add", "work", "Add numbers", {"type": "object"}),
+        lambda a, b: a + b,
+    )
     assert registry.execute(ToolCall("add", {"a": 2, "b": 3})) == 5
     assert registry.llm_tools()[0]["function"]["name"] == "add"
     with pytest.raises(CapabilityError):
@@ -60,24 +128,38 @@ def test_instance_capability_discovery_loads_all_kinds(tmp_path: Path) -> None:
     (instance / "capabilities" / "think" / "a.py").write_text(
         'import json,sys\nBODY="""Full private planning method."""\n'
         'D={"name":"t","description":"planning summary","parameters":{}}\n'
-        'print(json.dumps(D if "-l" in sys.argv else BODY))\n', encoding="utf-8"
+        'print(json.dumps(D if "-l" in sys.argv else BODY))\n',
+        encoding="utf-8",
     )
     (instance / "capabilities" / "work" / "b.py").write_text(
         'import json,sys\nD={"name":"w","description":"work","parameters":{"type":"object"}}\n'
-        'print(json.dumps(D if "-l" in sys.argv else {"received":json.load(sys.stdin)}))\n', encoding="utf-8"
+        'print(json.dumps(D if "-l" in sys.argv else {"received":json.load(sys.stdin)}))\n',
+        encoding="utf-8",
     )
     (instance / "capabilities" / "measure" / "c.py").write_text(
         'import json,sys\nD={"name":"m","description":"measure","parameters":{"type":"object"}}\n'
-        'print(json.dumps(D if "-l" in sys.argv else {"feature":sys.argv[-1]}))\n', encoding="utf-8"
+        'print(json.dumps(D if "-l" in sys.argv else {"feature":sys.argv[-1]}))\n',
+        encoding="utf-8",
     )
     registry = CapabilityRegistry()
     register_instance_capabilities(instance, registry, instance / "environment")
-    assert {item.kind for item in registry.descriptors()} == {"think", "measure", "work"}
+    assert {item.kind for item in registry.descriptors()} == {
+        "think",
+        "measure",
+        "work",
+    }
     assert "Full private planning method" not in str(registry.prompt_context())
-    assert registry.execute(ToolCall(THINK_READER_NAME, {"name": "t"}))["content"] == "Full private planning method."
-    assert registry.execute(ToolCall("m", {"feature": "temperature"})) == {"feature": "temperature"}
+    assert (
+        registry.execute(ToolCall(THINK_READER_NAME, {"name": "t"}))["content"]
+        == "Full private planning method."
+    )
+    assert registry.execute(ToolCall("m", {"feature": "temperature"})) == {
+        "feature": "temperature"
+    }
     assert registry.execute(ToolCall("w", {"value": 3})) == {"received": {"value": 3}}
-    assert registry.execute(ToolCall("w", {"_script": "/tmp/override"})) == {"received": {"_script": "/tmp/override"}}
+    assert registry.execute(ToolCall("w", {"_script": "/tmp/override"})) == {
+        "received": {"_script": "/tmp/override"}
+    }
 
 
 def test_registry_rejects_non_json_work_results() -> None:
@@ -87,7 +169,9 @@ def test_registry_rejects_non_json_work_results() -> None:
         registry.execute(ToolCall("bad"))
 
 
-def test_capability_runner_preserves_dbus_addresses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_capability_runner_preserves_dbus_addresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from pivot.capabilities.registry import CapabilityScriptRunner
 
     environment = tmp_path / "environment"
@@ -103,6 +187,6 @@ def test_capability_runner_preserves_dbus_addresses(tmp_path: Path, monkeypatch:
     )
     monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/pivot-test-bus")
 
-    assert CapabilityScriptRunner(environment, instance=tmp_path)._run(script, ["-l"]) == (
-        "unix:path=/tmp/pivot-test-bus"
-    )
+    assert CapabilityScriptRunner(environment, instance=tmp_path)._run(
+        script, ["-l"]
+    ) == ("unix:path=/tmp/pivot-test-bus")

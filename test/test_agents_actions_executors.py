@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+
 import pytest
 
 from pivot.actions import ACTION_TOOL, ActionDetector, ActionKind
@@ -42,7 +43,11 @@ def test_action_detector_normalizes_capability_kind_aliases() -> None:
             tool_calls=(
                 ToolCall(
                     ACTION_TOOL,
-                    {"kind": kind, "name": "linux_package_runbook", "arguments": {"operation": "search"}},
+                    {
+                        "kind": kind,
+                        "name": "linux_package_runbook",
+                        "arguments": {"operation": "search"},
+                    },
                     "alias-call",
                 ),
             )
@@ -114,6 +119,7 @@ class DelegatingLLM:
                     "name": "inspector",
                     "capabilities": ["echo"],
                     "events": ["ready"],
+                    "recurrence": "once",
                 },
             }
             return _action_response(action, "main-delegate")
@@ -123,7 +129,11 @@ class DelegatingLLM:
         assert any(tool["function"]["name"] == "pivot_wait_event" for tool in tools)
         if not tool_messages:
             return _action_response(
-                {"kind": "capability", "name": "echo", "arguments": {"value": "checked"}},
+                {
+                    "kind": "capability",
+                    "name": "echo",
+                    "arguments": {"value": "checked"},
+                },
                 "worker-capability",
             )
         if len(tool_messages) == 1:
@@ -147,7 +157,10 @@ def _action_response(action: dict[str, object], call_id: str) -> dict[str, objec
                     "tool_calls": [
                         {
                             "id": call_id,
-                            "function": {"name": ACTION_TOOL, "arguments": json.dumps(action)},
+                            "function": {
+                                "name": ACTION_TOOL,
+                                "arguments": json.dumps(action),
+                            },
                         }
                     ],
                 }
@@ -164,7 +177,9 @@ def _agent_runtime(tmp_path: Path) -> Runtime:
         lambda value: {"value": value},
     )
     registry.register(
-        CapabilityDescriptor("unassigned", "work", "Must remain unavailable", {"type": "object"}),
+        CapabilityDescriptor(
+            "unassigned", "work", "Must remain unavailable", {"type": "object"}
+        ),
         lambda: {"unexpected": True},
     )
     events = EventPool()
@@ -195,7 +210,9 @@ def _agent_runtime(tmp_path: Path) -> Runtime:
         max_rounds=6,
     )
     config = PivotConfig(tmp_path, ProviderCredential("test", "test-model"))
-    return Runtime(config, registry, events, event_service, memory, main, None, executors, agents)
+    return Runtime(
+        config, registry, events, event_service, memory, main, None, executors, agents
+    )
 
 
 def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) -> None:
@@ -203,7 +220,9 @@ def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) ->
     assert runtime.agents is not None
     updates = []
 
-    response = runtime.agents.main_agent._activate("Handle this", progress=updates.append)
+    response = runtime.agents.main_agent._activate(
+        "Handle this", progress=updates.append
+    )
 
     assert response == "Worker task accepted."
     records = runtime.agents.records()
@@ -212,22 +231,36 @@ def test_main_agent_delegates_scoped_work_and_receives_report(tmp_path: Path) ->
     worker = runtime.agents.wait(worker.agent_id, timeout=2)
     assert worker.capabilities == ("echo",)
     assert worker.events == ("ready",)
+    assert worker.one_shot is True
     assert worker.report == {"finding": "scoped work complete"}
     assert worker.state == "completed"
     assert "agent_started" in [update.kind for update in updates]
     with sqlite3.connect(runtime.memory.path) as connection:
         task_origin = connection.execute(
-            "SELECT origin_activation_id FROM tasks WHERE task_id = ?", (worker.task_id,)
+            "SELECT origin_activation_id FROM tasks WHERE task_id = ?",
+            (worker.task_id,),
         ).fetchone()[0]
         assert task_origin is not None
-        assert connection.execute(
-            "SELECT count(*) FROM activations WHERE activation_id = ?", (task_origin,)
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM activations WHERE activation_id = ?",
+                (task_origin,),
+            ).fetchone()[0]
+            == 1
+        )
     with pytest.raises(AgentControlError, match="Unknown assigned capabilities"):
         runtime.agents.invoke_main(
             "agent.create",
             {"capabilities": ["missing"], "events": []},
         )
+
+    worker_count = len(runtime.agents.records())
+    with pytest.raises(AgentControlError, match="require recurrence"):
+        runtime.agents.invoke_main(
+            "agent.delegate",
+            {"task": "wait once", "capabilities": [], "events": ["ready"]},
+        )
+    assert len(runtime.agents.records()) == worker_count
 
 
 def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
@@ -285,14 +318,17 @@ def test_worker_assignment_does_not_block_main_agent(tmp_path: Path) -> None:
     memory.close()
 
 
-def test_worker_completion_reenters_main_agent_as_typed_stimulus(tmp_path: Path) -> None:
+def test_worker_completion_reenters_main_agent_as_typed_stimulus(
+    tmp_path: Path,
+) -> None:
     class CompletionLLM:
         def complete(self, messages, *, tools=()):
             context = json.loads(messages[0].content.split("\n", 1)[1])
             if context["agent"]["role"] == "worker":
                 return {"choices": [{"message": {"content": "worker evidence"}}]}
             assert any(
-                message.role == "system" and '"kind":"worker_report"' in str(message.content)
+                message.role == "system"
+                and '"kind":"worker_report"' in str(message.content)
                 for message in messages[1:]
             )
             return {"choices": [{"message": {"content": "worker evidence integrated"}}]}
@@ -347,9 +383,15 @@ def test_worker_completion_reenters_main_agent_as_typed_stimulus(tmp_path: Path)
         deadline = time.monotonic() + 2
         completion_stimulus = None
         while time.monotonic() < deadline:
-            candidates = [item for item in client.control.stimuli() if item.kind == "worker_report"]
+            candidates = [
+                item
+                for item in client.control.stimuli()
+                if item.kind == "worker_report"
+            ]
             if candidates:
-                completion_stimulus = client.control.wait_stimulus(candidates[-1].stimulus_id, timeout=0.2)
+                completion_stimulus = client.control.wait_stimulus(
+                    candidates[-1].stimulus_id, timeout=0.2
+                )
                 if completion_stimulus.state not in {"queued", "processing"}:
                     break
             time.sleep(0.01)
@@ -357,5 +399,153 @@ def test_worker_completion_reenters_main_agent_as_typed_stimulus(tmp_path: Path)
         assert completion_stimulus.state == "completed"
         assert completion_stimulus.payload["agent_id"] == worker.agent_id
         assert main.history[-1].content == "worker evidence integrated"
+    finally:
+        client.close()
+
+
+def test_explicit_worker_report_wakes_main_while_worker_keeps_waiting(
+    tmp_path: Path,
+) -> None:
+    main_responded = threading.Event()
+    sensor_value = {"ready": False}
+
+    class ReportThenWaitLLM:
+        def complete(self, messages, *, tools=()):
+            context = json.loads(messages[0].content.split("\n", 1)[1])
+            if context["agent"]["role"] == "main":
+                assert any(
+                    message.role == "system"
+                    and '"kind":"worker_report"' in str(message.content)
+                    for message in messages[1:]
+                )
+                main_responded.set()
+                return {
+                    "choices": [
+                        {"message": {"content": "Worker occurrence acknowledged."}}
+                    ]
+                }
+
+            tool_messages = [message for message in messages if message.role == "tool"]
+            if not tool_messages:
+                return _action_response(
+                    {
+                        "kind": "control",
+                        "name": "agent.report",
+                        "arguments": {
+                            "result": {"temperature_c": 31.2, "occurrence": 1}
+                        },
+                    },
+                    "worker-partial-report",
+                )
+            if len(tool_messages) == 1:
+                return _action_response(
+                    {
+                        "kind": "event",
+                        "name": "wait",
+                        "arguments": {
+                            "event": "ready",
+                            "operator": "==",
+                            "expected": True,
+                            "timeout": 0.2,
+                            "trigger": "rising",
+                        },
+                    },
+                    "worker-continues-waiting",
+                )
+            return {"choices": [{"message": {"content": "Worker finished."}}]}
+
+    class SensorRunner:
+        def poll(self, source: str):
+            assert source == "/event.py"
+            return dict(sensor_value)
+
+    llm = ReportThenWaitLLM()
+    registry = CapabilityRegistry()
+    events = EventPool()
+    events.register(
+        EventDescriptor("ready", "Ready state", "ready", ("==",), source="/event.py")
+    )
+    service = EventService(
+        events,
+        EventSupervisor(events, SensorRunner(), poll_interval=0.005),
+        poll_interval=0.005,
+    )
+    executors = ExecutorRegistry()
+    memory = RuntimeStore(tmp_path / "memory")
+    main = PersistentAgent(
+        memory.main_agent_id(),
+        llm=llm,
+        capabilities=registry,
+        memory=memory,
+        events=events,
+        event_service=service,
+        executors=executors,
+        max_rounds=4,
+    )
+    agents = AgentControl(
+        main,
+        llm=llm,
+        capabilities=registry,
+        memory=memory,
+        events=events,
+        event_service=service,
+        executors=executors,
+        max_rounds=4,
+    )
+    runtime = Runtime(
+        PivotConfig(tmp_path, ProviderCredential("test", "test-model")),
+        registry,
+        events,
+        service,
+        memory,
+        main,
+        None,
+        executors,
+        agents,
+    )
+    client = PivotClient(runtime)
+    try:
+        delegated = agents.invoke_main(
+            "agent.delegate",
+            {
+                "task": "report once, then keep waiting",
+                "capabilities": [],
+                "events": ["ready"],
+                "recurrence": "rising",
+            },
+        )
+        worker_id = delegated["agent"]["agent_id"]
+        assert agents.get(worker_id).one_shot is False
+
+        assert main_responded.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        while (
+            time.monotonic() < deadline
+            and agents.get(worker_id).agent.state != "pending"
+        ):
+            time.sleep(0.005)
+        worker = agents.get(worker_id)
+        assert worker.state == "running"
+        assert worker.agent.state == "pending"
+
+        reports = [
+            item for item in client.control.stimuli() if item.kind == "worker_report"
+        ]
+        assert len(reports) == 1
+        assert reports[0].payload["partial"] is True
+        assert reports[0].payload["report_revision"] == 1
+
+        worker = agents.wait(worker_id, timeout=2)
+        assert worker.state == "completed"
+        assert (
+            len(
+                [
+                    item
+                    for item in client.control.stimuli()
+                    if item.kind == "worker_report"
+                ]
+            )
+            == 1
+        )
     finally:
         client.close()

@@ -33,7 +33,9 @@ def _envelope(value: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise ControlError(f"Stimulus envelope contains invalid JSON: {exc.msg}") from exc
+        raise ControlError(
+            f"Stimulus envelope contains invalid JSON: {exc.msg}"
+        ) from exc
     if not isinstance(parsed, Mapping):
         raise ControlError("Stimulus envelope JSON must be an object")
     return dict(parsed)
@@ -44,7 +46,9 @@ def _service_interface(control: PivotControl) -> Any:
         from dbus_next import DBusError
         from dbus_next.service import ServiceInterface, method, signal
     except ImportError as exc:  # pragma: no cover - declared runtime dependency
-        raise ControlDBusError("dbus-next is required for the pivot control service") from exc
+        raise ControlDBusError(
+            "dbus-next is required for the pivot control service"
+        ) from exc
 
     class PivotControlInterface(ServiceInterface):
         def __init__(self) -> None:
@@ -56,8 +60,12 @@ def _service_interface(control: PivotControl) -> Any:
             except ControlError as exc:
                 raise DBusError(CONTROL_DBUS_ERROR, str(exc)) from exc
             except Exception as exc:
-                LOGGER.error("D-Bus framework method failed error_type=%s", type(exc).__name__)
-                raise DBusError(CONTROL_DBUS_ERROR, f"{type(exc).__name__}: {exc}") from exc
+                LOGGER.error(
+                    "D-Bus framework method failed error_type=%s", type(exc).__name__
+                )
+                raise DBusError(
+                    CONTROL_DBUS_ERROR, f"{type(exc).__name__}: {exc}"
+                ) from exc
 
         @method()
         def Ping(self) -> "s":
@@ -77,7 +85,9 @@ def _service_interface(control: PivotControl) -> Any:
 
         @method()
         def ListStimuli(self, limit: "u") -> "s":
-            return self._call(lambda: _json([item.as_dict() for item in control.stimuli(limit=limit)]))
+            return self._call(
+                lambda: _json([item.as_dict() for item in control.stimuli(limit=limit)])
+            )
 
         @method()
         def ListOutputs(self, after_sequence: "t", limit: "u") -> "s":
@@ -85,7 +95,9 @@ def _service_interface(control: PivotControl) -> Any:
                 lambda: _json(
                     [
                         item.as_dict()
-                        for item in control.outputs(after_sequence=after_sequence, limit=limit)
+                        for item in control.outputs(
+                            after_sequence=after_sequence, limit=limit
+                        )
                     ]
                 )
             )
@@ -125,7 +137,10 @@ def _service_interface(control: PivotControl) -> Any:
                 self.StimulusChanged(encoded)
             elif event == "output_available":
                 self.OutputAvailable(encoded)
-            elif event != "activation_progress":
+            else:
+                # Progress events are part of the public runtime observability
+                # surface. Consumers can selectively render them without
+                # polling the control object for internal activation details.
                 self.RuntimeEvent(event, encoded)
 
     return PivotControlInterface()
@@ -163,14 +178,21 @@ class ControlDBusService:
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive() and self._ready.is_set() and self._startup_error is None
+        return (
+            self._thread is not None
+            and self._thread.is_alive()
+            and self._ready.is_set()
+            and self._startup_error is None
+        )
 
     def start(self) -> None:
         if self._thread is not None:
             if self.running:
                 return
             raise ControlDBusError("D-Bus control service has already stopped")
-        self._thread = threading.Thread(target=self._thread_main, name="pivot-control-dbus", daemon=True)
+        self._thread = threading.Thread(
+            target=self._thread_main, name="pivot-control-dbus", daemon=True
+        )
         self._thread.start()
         if not self._ready.wait(self.start_timeout):
             self.stop()
@@ -178,8 +200,14 @@ class ControlDBusService:
         if self._startup_error is not None:
             error = self._startup_error
             self.stop()
-            raise ControlDBusError(f"Unable to start D-Bus control service: {type(error).__name__}: {error}") from error
-        LOGGER.info("D-Bus control service started bus=%s service=%s", self.bus, self.service_name)
+            raise ControlDBusError(
+                f"Unable to start D-Bus control service: {type(error).__name__}: {error}"
+            ) from error
+        LOGGER.info(
+            "D-Bus control service started bus=%s service=%s",
+            self.bus,
+            self.service_name,
+        )
 
     def stop(self) -> None:
         loop = self._loop
@@ -207,23 +235,38 @@ class ControlDBusService:
             from dbus_next import BusType, NameFlag, RequestNameReply
             from dbus_next.aio import MessageBus
         except ImportError as exc:  # pragma: no cover - declared runtime dependency
-            raise ControlDBusError("dbus-next is required for the pivot control service") from exc
+            raise ControlDBusError(
+                "dbus-next is required for the pivot control service"
+            ) from exc
         self._loop = asyncio.get_running_loop()
         self._stop_event = asyncio.Event()
         bus_type = BusType.SESSION if self.bus == "session" else BusType.SYSTEM
-        message_bus = MessageBus(bus_address=self.bus_address) if self.bus_address else MessageBus(bus_type=bus_type)
+        message_bus = (
+            MessageBus(bus_address=self.bus_address)
+            if self.bus_address
+            else MessageBus(bus_type=bus_type)
+        )
         connection = await message_bus.connect()
         try:
             interface = _service_interface(self.control)
             connection.export(CONTROL_DBUS_PATH, interface)
-            reply = await connection.request_name(self.service_name, NameFlag.DO_NOT_QUEUE)
-            if reply not in {RequestNameReply.PRIMARY_OWNER, RequestNameReply.ALREADY_OWNER}:
-                raise ControlDBusError(f"D-Bus service name is already owned: {self.service_name}")
+            reply = await connection.request_name(
+                self.service_name, NameFlag.DO_NOT_QUEUE
+            )
+            if reply not in {
+                RequestNameReply.PRIMARY_OWNER,
+                RequestNameReply.ALREADY_OWNER,
+            }:
+                raise ControlDBusError(
+                    f"D-Bus service name is already owned: {self.service_name}"
+                )
 
             def listener(event: str, payload: Mapping[str, Any]) -> None:
                 loop = self._loop
                 if loop is not None and loop.is_running():
-                    loop.call_soon_threadsafe(interface.emit_control_event, event, payload)
+                    loop.call_soon_threadsafe(
+                        interface.emit_control_event, event, payload
+                    )
 
             self._unsubscribe = self.control.subscribe(listener)
             self._ready.set()

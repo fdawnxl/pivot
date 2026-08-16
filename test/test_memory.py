@@ -9,7 +9,7 @@ from pivot.actions import ACTION_TOOL
 from pivot.activation import PersistentAgent
 from pivot.capabilities import CapabilityRegistry
 from pivot.memory import ContextBuilder, MemoryService, RuntimeStore
-from pivot.models import Message
+from pivot.models import Message, ToolCall
 
 
 def test_memory_store_has_stable_main_identity_and_wal_storage(tmp_path: Path) -> None:
@@ -24,11 +24,22 @@ def test_memory_store_has_stable_main_identity_and_wal_storage(tmp_path: Path) -
     assert second.main_agent_id() == agent_id
     with sqlite3.connect(second.path) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == RuntimeStore.SCHEMA_VERSION
-        assert connection.execute("SELECT count(*) FROM agents WHERE role = 'main'").fetchone()[0] == 1
-        assert connection.execute(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('stimuli', 'outputs')"
-        ).fetchone()[0] == 2
+        assert (
+            connection.execute("PRAGMA user_version").fetchone()[0]
+            == RuntimeStore.SCHEMA_VERSION
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM agents WHERE role = 'main'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('stimuli', 'outputs')"
+            ).fetchone()[0]
+            == 2
+        )
     second.close()
 
 
@@ -37,9 +48,15 @@ def test_messages_are_appended_and_context_is_bounded(tmp_path: Path) -> None:
     agent_id = memory.main_agent_id()
     for index in range(4):
         activation_id = memory.create_activation(agent_id, "user", f"request {index}")
-        memory.append_message(agent_id, activation_id, Message("user", f"request {index}"))
-        memory.append_message(agent_id, activation_id, Message("assistant", f"response {index}"))
-        memory.finish_activation(activation_id, "completed", response=f"response {index}")
+        memory.append_message(
+            agent_id, activation_id, Message("user", f"request {index}")
+        )
+        memory.append_message(
+            agent_id, activation_id, Message("assistant", f"response {index}")
+        )
+        memory.finish_activation(
+            activation_id, "completed", response=f"response {index}"
+        )
 
     current = memory.create_activation(agent_id, "user", "current")
     memory.append_message(agent_id, current, Message("user", "current"))
@@ -51,14 +68,63 @@ def test_messages_are_appended_and_context_is_bounded(tmp_path: Path) -> None:
     )
 
     assert len(memory.messages(agent_id)) == 9
-    assert [message.content for message in context[1:]] == ["request 3", "response 3", "current"]
+    assert [message.content for message in context[1:]] == [
+        "request 3",
+        "response 3",
+        "current",
+    ]
     with sqlite3.connect(memory.path) as connection:
-        ids = [row[0] for row in connection.execute("SELECT message_id FROM messages ORDER BY message_id")]
+        ids = [
+            row[0]
+            for row in connection.execute(
+                "SELECT message_id FROM messages ORDER BY message_id"
+            )
+        ]
         assert ids == list(range(1, 10))
     memory.close()
 
 
-def test_context_rebuilds_runtime_and_world_state_without_stale_snapshot(tmp_path: Path) -> None:
+def test_context_keeps_tool_chain_when_result_contains_embedded_media(
+    tmp_path: Path,
+) -> None:
+    memory = RuntimeStore(tmp_path / "memory")
+    agent_id = memory.main_agent_id()
+    activation_id = memory.create_activation(agent_id, "user", "inspect camera")
+    memory.append_message(agent_id, activation_id, Message("user", "inspect camera"))
+    memory.append_message(
+        agent_id,
+        activation_id,
+        Message("assistant", "", tool_calls=(ToolCall("camera", {}, "call-1"),)),
+    )
+    memory.append_message(
+        agent_id,
+        activation_id,
+        Message(
+            "tool",
+            (
+                {"type": "text", "text": "Camera frame."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64," + "A" * 5000},
+                },
+            ),
+            name="camera",
+            tool_call_id="call-1",
+        ),
+    )
+
+    context = memory.context_messages(
+        agent_id, activation_id, max_messages=8, max_chars=1024
+    )
+
+    assert [message.role for message in context] == ["user", "assistant", "tool"]
+    assert isinstance(context[-1].content, tuple)
+    memory.close()
+
+
+def test_context_rebuilds_runtime_and_world_state_without_stale_snapshot(
+    tmp_path: Path,
+) -> None:
     memory = RuntimeStore(tmp_path / "memory")
     agent_id = memory.main_agent_id()
     activation_id = memory.create_activation(agent_id, "user", "temperature")
@@ -156,7 +222,9 @@ def test_tasks_and_event_continuations_are_durable(tmp_path: Path) -> None:
 
     reopened = RuntimeStore(root)
     with sqlite3.connect(reopened.path) as connection:
-        task = connection.execute("SELECT description, state FROM tasks WHERE task_id = 'task-1'").fetchone()
+        task = connection.execute(
+            "SELECT description, state FROM tasks WHERE task_id = 'task-1'"
+        ).fetchone()
         continuation = connection.execute(
             "SELECT kind, state, condition_json, deadline FROM continuations WHERE continuation_id = 'wait-1'"
         ).fetchone()
@@ -173,13 +241,27 @@ def test_memory_action_is_routed_through_agent_activation(tmp_path: Path) -> Non
                 action = {
                     "kind": "memory",
                     "name": "memory.remember",
-                    "arguments": {"kind": "preference", "content": "User prefers concise answers"},
+                    "arguments": {
+                        "kind": "preference",
+                        "content": "User prefers concise answers",
+                    },
                 }
                 return {
-                    "choices": [{"message": {"tool_calls": [{
-                        "id": "remember-1",
-                        "function": {"name": ACTION_TOOL, "arguments": json.dumps(action)},
-                    }]}}]
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "id": "remember-1",
+                                        "function": {
+                                            "name": ACTION_TOOL,
+                                            "arguments": json.dumps(action),
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
                 }
             return {"choices": [{"message": {"content": "Preference saved."}}]}
 

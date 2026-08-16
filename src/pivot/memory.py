@@ -60,7 +60,7 @@ class MemoryRecord:
 class RuntimeStore:
     """Own the instance database, schema, transactions, and runtime records."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -73,7 +73,9 @@ class RuntimeStore:
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._connection.execute("PRAGMA synchronous=FULL")
         except sqlite3.Error as exc:
-            raise MemoryError(f"Cannot open memory database {self.path}: {exc}") from exc
+            raise MemoryError(
+                f"Cannot open memory database {self.path}: {exc}"
+            ) from exc
         self._lock = threading.RLock()
         self._fts_enabled = False
         self._closed = False
@@ -88,6 +90,7 @@ class RuntimeStore:
             parent_id TEXT,
             capabilities_json TEXT NOT NULL DEFAULT '[]',
             events_json TEXT NOT NULL DEFAULT '[]',
+            one_shot INTEGER NOT NULL DEFAULT 0,
             state TEXT NOT NULL,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
@@ -236,12 +239,24 @@ class RuntimeStore:
         try:
             with self._lock, self._connection:
                 self._connection.executescript(schema)
+                # Instances created before one-shot workers were introduced do not
+                # have the column; SQLite keeps existing rows with the safe default.
+                agent_columns = {
+                    str(row[1])
+                    for row in self._connection.execute("PRAGMA table_info(agents)")
+                }
+                if "one_shot" not in agent_columns:
+                    self._connection.execute(
+                        "ALTER TABLE agents ADD COLUMN one_shot INTEGER NOT NULL DEFAULT 0"
+                    )
                 try:
                     self._connection.execute(
                         "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(memory_id UNINDEXED, content)"
                     )
                 except sqlite3.OperationalError:
-                    LOGGER.warning("SQLite FTS5 is unavailable; memory recall will use substring matching")
+                    LOGGER.warning(
+                        "SQLite FTS5 is unavailable; memory recall will use substring matching"
+                    )
                 else:
                     self._fts_enabled = True
                 self._connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
@@ -259,7 +274,9 @@ class RuntimeStore:
         """Return the durable main-agent identity, creating it once."""
 
         with self._lock, self._connection:
-            row = self._connection.execute("SELECT agent_id FROM agents WHERE role = 'main'").fetchone()
+            row = self._connection.execute(
+                "SELECT agent_id FROM agents WHERE role = 'main'"
+            ).fetchone()
             if row is not None:
                 return str(row["agent_id"])
             agent_id = str(uuid4())
@@ -268,7 +285,9 @@ class RuntimeStore:
                 "INSERT INTO agents(agent_id, role, name, state, created_at, updated_at) VALUES (?, 'main', 'main', 'ready', ?, ?)",
                 (agent_id, now, now),
             )
-            self.append_journal("agent.created", {"role": "main", "name": "main"}, agent_id=agent_id)
+            self.append_journal(
+                "agent.created", {"role": "main", "name": "main"}, agent_id=agent_id
+            )
             return agent_id
 
     def create_worker(
@@ -278,27 +297,45 @@ class RuntimeStore:
         parent_id: str,
         capabilities: Sequence[str],
         events: Sequence[str],
+        one_shot: bool = False,
     ) -> str:
         agent_id = str(uuid4())
         now = time.time()
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO agents(
-                    agent_id, role, name, parent_id, capabilities_json, events_json, state, created_at, updated_at
-                ) VALUES (?, 'worker', ?, ?, ?, ?, 'created', ?, ?)""",
-                (agent_id, name, parent_id, _json(list(capabilities)), _json(list(events)), now, now),
+                    agent_id, role, name, parent_id, capabilities_json, events_json, one_shot, state,
+                    created_at, updated_at
+                ) VALUES (?, 'worker', ?, ?, ?, ?, ?, 'created', ?, ?)""",
+                (
+                    agent_id,
+                    name,
+                    parent_id,
+                    _json(list(capabilities)),
+                    _json(list(events)),
+                    int(one_shot),
+                    now,
+                    now,
+                ),
             )
-        self.append_journal("agent.created", {"role": "worker", "name": name}, agent_id=agent_id)
+        self.append_journal(
+            "agent.created",
+            {"role": "worker", "name": name, "one_shot": bool(one_shot)},
+            agent_id=agent_id,
+        )
         return agent_id
 
     def agent_rows(self) -> tuple[dict[str, Any], ...]:
         with self._lock:
-            rows = self._connection.execute("SELECT * FROM agents ORDER BY created_at, agent_id").fetchall()
+            rows = self._connection.execute(
+                "SELECT * FROM agents ORDER BY created_at, agent_id"
+            ).fetchall()
         return tuple(
             {
                 **dict(row),
                 "capabilities": tuple(json.loads(row["capabilities_json"])),
                 "events": tuple(json.loads(row["events_json"])),
+                "one_shot": bool(row["one_shot"]),
             }
             for row in rows
         )
@@ -309,6 +346,126 @@ class RuntimeStore:
                 "UPDATE agents SET state = ?, updated_at = ? WHERE agent_id = ?",
                 (state, time.time(), agent_id),
             )
+
+    def worker_report_pending(self, agent_id: str) -> bool:
+        """Return whether a worker report still needs main-agent processing."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload_json FROM stimuli WHERE kind = 'worker_report' AND state IN ('queued', 'processing')"
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict) and payload.get("agent_id") == agent_id:
+                return True
+        return False
+
+    def latest_task(self, agent_id: str) -> dict[str, Any] | None:
+        """Return the newest durable task for a worker, if one exists."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM tasks WHERE owner_agent_id = ? ORDER BY created_at DESC, task_id DESC LIMIT 1",
+                (agent_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "task_id": str(row["task_id"]),
+            "description": str(row["description"]),
+            "state": str(row["state"]),
+            "result": json.loads(row["result_json"])
+            if row["result_json"] is not None
+            else None,
+            "error": str(row["error"]) if row["error"] is not None else None,
+        }
+
+    def delete_worker(self, agent_id: str) -> bool:
+        """Delete a worker and its private durable records after retention."""
+
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT role FROM agents WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if row["role"] != "worker":
+                raise MemoryError("Only worker agents can be deleted")
+            activation_rows = self._connection.execute(
+                "SELECT activation_id FROM activations WHERE agent_id = ?", (agent_id,)
+            ).fetchall()
+            activation_ids = [str(item["activation_id"]) for item in activation_rows]
+            if activation_ids:
+                placeholders = ",".join("?" for _ in activation_ids)
+                self._connection.execute(
+                    f"UPDATE tasks SET origin_activation_id = NULL WHERE origin_activation_id IN ({placeholders})",
+                    activation_ids,
+                )
+                self._connection.execute(
+                    f"UPDATE stimuli SET activation_id = NULL WHERE activation_id IN ({placeholders})",
+                    activation_ids,
+                )
+                self._connection.execute(
+                    f"DELETE FROM messages WHERE activation_id IN ({placeholders})",
+                    activation_ids,
+                )
+                self._connection.execute(
+                    f"DELETE FROM journal WHERE activation_id IN ({placeholders})",
+                    activation_ids,
+                )
+                self._connection.execute(
+                    f"DELETE FROM activations WHERE activation_id IN ({placeholders})",
+                    activation_ids,
+                )
+            worker_stimuli = self._connection.execute(
+                "SELECT stimulus_id FROM stimuli WHERE target_agent_id = ?", (agent_id,)
+            ).fetchall()
+            stimulus_ids = [str(item["stimulus_id"]) for item in worker_stimuli]
+            if stimulus_ids:
+                placeholders = ",".join("?" for _ in stimulus_ids)
+                self._connection.execute(
+                    f"DELETE FROM event_occurrences WHERE stimulus_id IN ({placeholders})",
+                    stimulus_ids,
+                )
+                self._connection.execute(
+                    f"DELETE FROM outputs WHERE stimulus_id IN ({placeholders})",
+                    stimulus_ids,
+                )
+                self._connection.execute(
+                    f"DELETE FROM stimuli WHERE stimulus_id IN ({placeholders})",
+                    stimulus_ids,
+                )
+            self._connection.execute(
+                "DELETE FROM outputs WHERE agent_id = ?", (agent_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM continuations WHERE agent_id = ?", (agent_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM tasks WHERE owner_agent_id = ?", (agent_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM journal WHERE agent_id = ?", (agent_id,)
+            )
+            if self._fts_enabled:
+                self._connection.execute(
+                    "DELETE FROM memory_fts WHERE memory_id IN "
+                    "(SELECT memory_id FROM memories WHERE namespace = ?)",
+                    (f"agent:{agent_id}",),
+                )
+            self._connection.execute(
+                "DELETE FROM memories WHERE namespace = ?", (f"agent:{agent_id}",)
+            )
+            cursor = self._connection.execute(
+                "DELETE FROM agents WHERE agent_id = ?", (agent_id,)
+            )
+            deleted = bool(cursor.rowcount)
+        if deleted:
+            self.append_journal("agent.deleted", {"role": "worker"}, agent_id=agent_id)
+        return deleted
 
     def create_activation(
         self,
@@ -325,7 +482,14 @@ class RuntimeStore:
                 """INSERT INTO activations(
                     activation_id, agent_id, source, state, input_json, created_at, updated_at
                 ) VALUES (?, ?, ?, 'running', ?, ?, ?)""",
-                (activation_id, agent_id, source, _json(_content_value(content)), now, now),
+                (
+                    activation_id,
+                    agent_id,
+                    source,
+                    _json(_content_value(content)),
+                    now,
+                    now,
+                ),
             )
         self.append_journal(
             "activation.started",
@@ -349,7 +513,8 @@ class RuntimeStore:
                 (state, response, error, time.time(), activation_id),
             )
             row = self._connection.execute(
-                "SELECT agent_id FROM activations WHERE activation_id = ?", (activation_id,)
+                "SELECT agent_id FROM activations WHERE activation_id = ?",
+                (activation_id,),
             ).fetchone()
         self.append_journal(
             f"activation.{state}",
@@ -358,7 +523,9 @@ class RuntimeStore:
             activation_id=activation_id,
         )
 
-    def append_message(self, agent_id: str, activation_id: str, message: Message) -> None:
+    def append_message(
+        self, agent_id: str, activation_id: str, message: Message
+    ) -> None:
         with self._lock, self._connection:
             row = self._connection.execute(
                 "SELECT COALESCE(MAX(ordinal), -1) + 1 AS ordinal FROM messages WHERE activation_id = ?",
@@ -374,7 +541,9 @@ class RuntimeStore:
                     agent_id,
                     ordinal,
                     message.role,
-                    _json(_content_value(message.content)) if message.content is not None else None,
+                    _json(_content_value(message.content))
+                    if message.content is not None
+                    else None,
                     message.name,
                     _json([call.as_dict() for call in message.tool_calls]),
                     message.tool_call_id,
@@ -388,7 +557,9 @@ class RuntimeStore:
             activation_id=activation_id,
         )
 
-    def messages(self, agent_id: str, *, limit: int | None = None) -> tuple[Message, ...]:
+    def messages(
+        self, agent_id: str, *, limit: int | None = None
+    ) -> tuple[Message, ...]:
         query = "SELECT * FROM messages WHERE agent_id = ? ORDER BY message_id"
         parameters: tuple[Any, ...] = (agent_id,)
         if limit is not None:
@@ -418,7 +589,7 @@ class RuntimeStore:
         used = 0
         for row in rows:
             message = _row_message(row)
-            size = len(_json(message.as_dict()))
+            size = _context_message_size(message)
             if selected and used + size > max_chars:
                 break
             selected.append(message)
@@ -465,7 +636,8 @@ class RuntimeStore:
         with self._lock, self._connection:
             if supersedes is not None:
                 exists = self._connection.execute(
-                    "SELECT 1 FROM memories WHERE memory_id = ? AND deleted_at IS NULL", (supersedes,)
+                    "SELECT 1 FROM memories WHERE memory_id = ? AND deleted_at IS NULL",
+                    (supersedes,),
                 ).fetchone()
                 if exists is None:
                     raise MemoryError(f"Cannot supersede unknown memory: {supersedes}")
@@ -490,7 +662,8 @@ class RuntimeStore:
             )
             if self._fts_enabled:
                 self._connection.execute(
-                    "INSERT INTO memory_fts(memory_id, content) VALUES (?, ?)", (memory_id, content.strip())
+                    "INSERT INTO memory_fts(memory_id, content) VALUES (?, ?)",
+                    (memory_id, content.strip()),
                 )
         record = MemoryRecord(
             memory_id,
@@ -525,10 +698,14 @@ class RuntimeStore:
             "AND (m.valid_until IS NULL OR m.valid_until > ?) "
             "AND NOT EXISTS (SELECT 1 FROM memories AS newer WHERE newer.supersedes = m.memory_id)"
         )
-        terms = [item for item in re.findall(r"[^\W_]+", query, flags=re.UNICODE) if item]
+        terms = [
+            item for item in re.findall(r"[^\W_]+", query, flags=re.UNICODE) if item
+        ]
         with self._lock:
             if self._fts_enabled and terms:
-                expression = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms[:12])
+                expression = " OR ".join(
+                    f'"{term.replace(chr(34), "")}"' for term in terms[:12]
+                )
                 rows = self._connection.execute(
                     f"""SELECT m.* FROM memory_fts AS f
                     JOIN memories AS m ON m.memory_id = f.memory_id
@@ -553,12 +730,16 @@ class RuntimeStore:
                 (now, memory_id),
             )
             if cursor.rowcount and self._fts_enabled:
-                self._connection.execute("DELETE FROM memory_fts WHERE memory_id = ?", (memory_id,))
+                self._connection.execute(
+                    "DELETE FROM memory_fts WHERE memory_id = ?", (memory_id,)
+                )
         if cursor.rowcount:
             self.append_journal("memory.forgotten", {"memory_id": memory_id})
         return bool(cursor.rowcount)
 
-    def record_episode(self, agent_id: str, activation_id: str, stimulus: str, response: str) -> MemoryRecord:
+    def record_episode(
+        self, agent_id: str, activation_id: str, stimulus: str, response: str
+    ) -> MemoryRecord:
         content = f"Stimulus: {stimulus[:1000]}\nOutcome: {response[:2000]}"
         return self.remember(
             namespace=f"agent:{agent_id}",
@@ -623,7 +804,18 @@ class RuntimeStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(continuation_id) DO UPDATE SET state=excluded.state, result_json=excluded.result_json,
                     updated_at=excluded.updated_at""",
-                (continuation_id, task_id, agent_id, kind, state, _json(condition), deadline, _json(result) if result is not None else None, now, now),
+                (
+                    continuation_id,
+                    task_id,
+                    agent_id,
+                    kind,
+                    state,
+                    _json(condition),
+                    deadline,
+                    _json(result) if result is not None else None,
+                    now,
+                    now,
+                ),
             )
 
     def update_world_state(
@@ -676,8 +868,12 @@ class RuntimeStore:
             "bridge_id": str(row["bridge_id"]),
             "rule_signature": str(row["rule_signature"]),
             "matched": bool(row["matched"]),
-            "value": json.loads(row["value_json"]) if row["value_json"] is not None else None,
-            "observed_at": float(row["observed_at"]) if row["observed_at"] is not None else None,
+            "value": json.loads(row["value_json"])
+            if row["value_json"] is not None
+            else None,
+            "observed_at": float(row["observed_at"])
+            if row["observed_at"] is not None
+            else None,
             "fired_at": float(row["fired_at"]) if row["fired_at"] is not None else None,
         }
 
@@ -705,7 +901,14 @@ class RuntimeStore:
                         WHEN event_bridge_state.rule_signature != excluded.rule_signature THEN excluded.fired_at
                         ELSE COALESCE(excluded.fired_at, event_bridge_state.fired_at)
                     END""",
-                (bridge_id, rule_signature, int(matched), _json(value), observed_at, fired_at),
+                (
+                    bridge_id,
+                    rule_signature,
+                    int(matched),
+                    _json(value),
+                    observed_at,
+                    fired_at,
+                ),
             )
 
     def event_occurrences(self, *, limit: int = 100) -> tuple[dict[str, Any], ...]:
@@ -739,7 +942,9 @@ class RuntimeStore:
 class ContextBuilder:
     """Build a bounded prompt view from durable memory for one activation."""
 
-    def __init__(self, store: RuntimeStore, *, max_messages: int = 48, max_chars: int = 32000) -> None:
+    def __init__(
+        self, store: RuntimeStore, *, max_messages: int = 48, max_chars: int = 32000
+    ) -> None:
         if max_messages < 1 or max_chars < 1024:
             raise ValueError("Context limits are invalid")
         self.store = store
@@ -785,12 +990,23 @@ class MemoryService:
 
     def prompt_context(self) -> tuple[dict[str, Any], ...]:
         return (
-            {"name": "memory.remember", "arguments": ["kind", "content", "confidence?", "valid_for?", "supersedes?"]},
+            {
+                "name": "memory.remember",
+                "arguments": [
+                    "kind",
+                    "content",
+                    "confidence?",
+                    "valid_for?",
+                    "supersedes?",
+                ],
+            },
             {"name": "memory.recall", "arguments": ["query", "limit?"]},
             {"name": "memory.forget", "arguments": ["memory_id"]},
         )
 
-    def execute(self, agent_id: str, operation: str, arguments: Mapping[str, Any]) -> Any:
+    def execute(
+        self, agent_id: str, operation: str, arguments: Mapping[str, Any]
+    ) -> Any:
         if operation == "memory.remember":
             kind = arguments.get("kind")
             content = arguments.get("content")
@@ -801,7 +1017,9 @@ class MemoryService:
             if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
                 raise MemoryError("memory confidence must be a number")
             if valid_for is not None and (
-                not isinstance(valid_for, (int, float)) or isinstance(valid_for, bool) or valid_for <= 0
+                not isinstance(valid_for, (int, float))
+                or isinstance(valid_for, bool)
+                or valid_for <= 0
             ):
                 raise MemoryError("memory valid_for must be a positive number")
             supersedes = arguments.get("supersedes")
@@ -813,7 +1031,9 @@ class MemoryService:
                 content=content,
                 source=f"agent:{agent_id}",
                 confidence=float(confidence),
-                valid_until=time.time() + float(valid_for) if valid_for is not None else None,
+                valid_until=time.time() + float(valid_for)
+                if valid_for is not None
+                else None,
                 supersedes=supersedes,
             )
             return record.as_dict()
@@ -821,7 +1041,9 @@ class MemoryService:
             query = arguments.get("query")
             limit = arguments.get("limit", 8)
             if not isinstance(query, str) or not isinstance(limit, int):
-                raise MemoryError("memory.recall requires a string query and integer limit")
+                raise MemoryError(
+                    "memory.recall requires a string query and integer limit"
+                )
             return [
                 item.as_dict()
                 for item in self.store.recall(
@@ -839,7 +1061,9 @@ class MemoryService:
 
 
 def _row_message(row: sqlite3.Row) -> Message:
-    content_value = json.loads(row["content_json"]) if row["content_json"] is not None else None
+    content_value = (
+        json.loads(row["content_json"]) if row["content_json"] is not None else None
+    )
     content = normalize_content(content_value) if content_value is not None else None
     calls: list[ToolCall] = []
     for raw in json.loads(row["tool_calls_json"]):
@@ -848,7 +1072,9 @@ def _row_message(row: sqlite3.Row) -> Message:
         if isinstance(arguments, str):
             arguments = json.loads(arguments)
         calls.append(ToolCall(str(function["name"]), dict(arguments), raw.get("id")))
-    return Message(str(row["role"]), content, row["name"], tuple(calls), row["tool_call_id"])
+    return Message(
+        str(row["role"]), content, row["name"], tuple(calls), row["tool_call_id"]
+    )
 
 
 def _row_memory(row: sqlite3.Row) -> MemoryRecord:
@@ -869,6 +1095,24 @@ def _row_memory(row: sqlite3.Row) -> MemoryRecord:
 
 def _content_value(content: Any) -> Any:
     return list(content) if isinstance(content, tuple) else content
+
+
+def _context_message_size(message: Message) -> int:
+    """Estimate textual context cost without charging embedded media bytes."""
+
+    def bounded(value: Any, key: str | None = None) -> Any:
+        if isinstance(value, dict):
+            return {
+                item_key: bounded(item, item_key) for item_key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [bounded(item) for item in value]
+        if isinstance(value, str) and len(value) > 256:
+            if value.startswith("data:") or key in {"data", "b64_json"}:
+                return value[:96] + f"...[{len(value)} media characters]"
+        return value
+
+    return len(_json(bounded(message.as_dict())))
 
 
 def _json(value: Any) -> str:

@@ -8,8 +8,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .agents import AgentControl
 from .activation import CancellationToken, PersistentAgent, ProgressCallback
+from .agents import AgentControl
 from .capabilities import CapabilityRegistry
 from .capabilities.discovery import register_instance_capabilities
 from .config import PivotConfig
@@ -24,8 +24,8 @@ from .events import (
     load_event_scripts_isolated,
 )
 from .executors import ExecutorRegistry, ShellExecutor
-from .llm import LiteLLMClient
 from .lease import RuntimeLease
+from .llm import LiteLLMClient
 from .memory import ContextBuilder, MemoryService, RuntimeStore
 from .stimuli import MainAgentReactor, StimulusInbox
 
@@ -51,7 +51,9 @@ class Runtime:
     event_bridge: EventStimulusBridge | None = None
     _started: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
-    _lifecycle_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _lifecycle_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
 
     def start(self) -> None:
         """Start the persistent main-agent reactor once runtime services exist."""
@@ -62,7 +64,9 @@ class Runtime:
             if self._started:
                 return
             if self.agents is None:
-                raise RuntimeError("Agent control is required to start the main-agent reactor")
+                raise RuntimeError(
+                    "Agent control is required to start the main-agent reactor"
+                )
             if self.inbox is None:
                 self.inbox = StimulusInbox(
                     self.memory,
@@ -71,7 +75,9 @@ class Runtime:
                     priority_aging_seconds=self.config.stimulus_priority_aging_seconds,
                 )
             if self.reactor is None:
-                self.reactor = MainAgentReactor(self._main_agent, self.agents, self.inbox)
+                self.reactor = MainAgentReactor(
+                    self._main_agent, self.agents, self.inbox
+                )
             if self.event_bridge is None:
                 rules = load_event_bridge_rules(
                     self.config.instance_path / "events" / "bridges.toml",
@@ -143,11 +149,15 @@ def build_runtime(config: PivotConfig) -> Runtime:
             instance=config.instance_path,
             timeout=config.capability_timeout,
         )
-        for event in load_event_scripts_isolated(str(config.instance_path / "events"), event_runner):
+        for event in load_event_scripts_isolated(
+            str(config.instance_path / "events"), event_runner
+        ):
             try:
                 event_pool.register(event)
             except Exception as exc:
-                LOGGER.warning("Unable to register instance event %s: %s", event.name, exc)
+                LOGGER.warning(
+                    "Unable to register instance event %s: %s", event.name, exc
+                )
         event_service = EventService(
             event_pool,
             EventSupervisor(
@@ -195,6 +205,8 @@ def build_runtime(config: PivotConfig) -> Runtime:
             event_service=event_service,
             executors=executors,
             max_rounds=config.max_rounds,
+            worker_retention_seconds=config.agent_worker_retention_seconds,
+            worker_cleanup_interval=config.agent_worker_cleanup_interval,
         )
         LOGGER.info(
             "Runtime assembly completed dependencies=%d capabilities=%d events=%d executors=%d",
@@ -224,7 +236,9 @@ def build_runtime(config: PivotConfig) -> Runtime:
             except Exception:
                 LOGGER.exception("Runtime cleanup after failed assembly was incomplete")
         else:
-            steps: list[tuple[str, Callable[[], None]]] = [("dependency manager", dependencies.close)]
+            steps: list[tuple[str, Callable[[], None]]] = [
+                ("dependency manager", dependencies.close)
+            ]
             if memory is not None:
                 steps.append(("runtime store", memory.close))
             steps.append(("runtime lease", lease.release))
@@ -274,7 +288,9 @@ class PivotClient:
     ) -> str:
         """Run one turn through the main agent."""
 
-        return self.control.run_main(user_input, progress=progress, cancellation=cancellation)
+        return self.control.run_main(
+            user_input, progress=progress, cancellation=cancellation
+        )
 
     def inject(
         self,
@@ -285,7 +301,9 @@ class PivotClient:
     ) -> str:
         """Inject one transport-neutral envelope into the durable main inbox."""
 
-        return self.control.inject(envelope, progress=progress, cancellation=cancellation)
+        return self.control.inject(
+            envelope, progress=progress, cancellation=cancellation
+        )
 
     def wait_stimulus(self, stimulus_id: str, *, timeout: float | None = None) -> Any:
         """Wait for a previously injected envelope to reach a terminal state."""

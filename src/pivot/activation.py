@@ -6,7 +6,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
@@ -105,7 +105,11 @@ def normalize_agent_id(agent_id: str) -> str:
 
 
 def _action_content(result: Any) -> str | tuple[dict[str, Any], ...]:
-    candidate = result.get("content") if isinstance(result, dict) and "content" in result else result
+    candidate = (
+        result.get("content")
+        if isinstance(result, dict) and "content" in result
+        else result
+    )
     if isinstance(candidate, (list, tuple)):
         try:
             normalized = normalize_content(candidate)
@@ -145,7 +149,9 @@ class PersistentAgent:
         self.memory = memory
         self.events = events
         self.event_service = event_service
-        self.event_names = tuple(dict.fromkeys(event_names)) if event_names is not None else None
+        self.event_names = (
+            tuple(dict.fromkeys(event_names)) if event_names is not None else None
+        )
         self.executors = executors
         self.memory_service = memory_service or MemoryService(memory)
         self.context_builder = context_builder or ContextBuilder(memory)
@@ -175,7 +181,9 @@ class PersistentAgent:
 
         return self.memory.messages(self.agent_id)
 
-    def configure_control(self, control: AgentControl, *, executors: ExecutorRegistry | None = None) -> None:
+    def configure_control(
+        self, control: AgentControl, *, executors: ExecutorRegistry | None = None
+    ) -> None:
         self.agent_control = control
         if executors is not None:
             self.executors = executors
@@ -200,6 +208,7 @@ class PersistentAgent:
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
         started: Callable[[str], None] | None = None,
+        event_recurrence: Literal["once", "rising", "falling"] | None = None,
     ) -> str:
         """Run one finite activation; only framework gateways may call this method."""
 
@@ -218,8 +227,14 @@ class PersistentAgent:
         if started is not None:
             started(activation_id)
         input_role = "user" if source == "user" else "system"
-        self.memory.append_message(self.agent_id, activation_id, Message(input_role, normalized))
-        query = normalized if isinstance(normalized, str) else json.dumps(list(normalized), ensure_ascii=False, default=str)
+        self.memory.append_message(
+            self.agent_id, activation_id, Message(input_role, normalized)
+        )
+        query = (
+            normalized
+            if isinstance(normalized, str)
+            else json.dumps(list(normalized), ensure_ascii=False, default=str)
+        )
         self._set_state(ActivationState.RUNNING)
         try:
             with log_context(correlation_id=activation_id, agent_id=self.agent_id):
@@ -228,6 +243,7 @@ class PersistentAgent:
                     query,
                     progress=progress,
                     cancellation=token,
+                    event_recurrence=event_recurrence,
                 )
         except AgentCancelled as exc:
             self.memory.finish_activation(activation_id, "cancelled", error=str(exc))
@@ -254,11 +270,20 @@ class PersistentAgent:
         *,
         progress: ProgressCallback | None,
         cancellation: CancellationToken,
+        event_recurrence: Literal["once", "rising", "falling"] | None = None,
     ) -> str:
         self._raise_if_cancelled(activation_id, cancellation, progress)
         self._emit(progress, activation_id, "activation_started", "Activation started.")
-        for round_number in range(1, self.max_rounds + 1):
-            self._raise_if_cancelled(activation_id, cancellation, progress, round_number)
+        matched_event = False
+        unreported_event_matches = 0
+        round_number = 0
+        rounds_since_report = 0
+        while rounds_since_report < self.max_rounds:
+            round_number += 1
+            rounds_since_report += 1
+            self._raise_if_cancelled(
+                activation_id, cancellation, progress, round_number
+            )
             self._emit(
                 progress,
                 activation_id,
@@ -268,7 +293,9 @@ class PersistentAgent:
             )
             try:
                 tools = (action_tool(),) + self.capabilities.llm_tools()
-                if self.event_service and (self.role == "worker" or self.agent_control is None):
+                if self.event_service and (
+                    self.role == "worker" or self.agent_control is None
+                ):
                     tools += self.event_service.llm_tools(self.event_names)
                 if self.executors:
                     tools += self.executors.llm_tools()
@@ -276,20 +303,32 @@ class PersistentAgent:
                     agent_id=self.agent_id,
                     activation_id=activation_id,
                     query=query,
-                    runtime_context=self._runtime_context(),
+                    runtime_context=self._runtime_context(
+                        event_recurrence=event_recurrence
+                    ),
                 )
                 raw = self.llm.complete(messages, tools=tools)
-                self._raise_if_cancelled(activation_id, cancellation, progress, round_number)
+                self._raise_if_cancelled(
+                    activation_id, cancellation, progress, round_number
+                )
                 response = parse_response(raw)
                 detected = self.action_detector.detect(
                     response,
-                    capability_names=tuple(item.name for item in self.capabilities.descriptors()),
-                    executor_tools=self.executors.tool_routes() if self.executors else {},
+                    capability_names=tuple(
+                        item.name for item in self.capabilities.descriptors()
+                    ),
+                    executor_tools=self.executors.tool_routes()
+                    if self.executors
+                    else {},
                 )
             except AgentCancelled:
                 raise
             except Exception as exc:
-                LOGGER.exception("Agent activation failed agent_id=%s round=%d", self.agent_id, round_number)
+                LOGGER.exception(
+                    "Agent activation failed agent_id=%s round=%d",
+                    self.agent_id,
+                    round_number,
+                )
                 self._emit(
                     progress,
                     activation_id,
@@ -306,6 +345,24 @@ class PersistentAgent:
                 Message("assistant", detected.content, tool_calls=detected.calls),
             )
             if not detected.actions:
+                if event_recurrence is not None and unreported_event_matches:
+                    reminder = (
+                        "A matched event occurrence is still unreported. Call agent.report with that occurrence "
+                        "before finishing or creating another event wait."
+                    )
+                    self.memory.append_message(
+                        self.agent_id,
+                        activation_id,
+                        Message("system", reminder),
+                    )
+                    self._emit(
+                        progress,
+                        activation_id,
+                        "assistant_update",
+                        reminder,
+                        round_number=round_number,
+                    )
+                    continue
                 self._emit(
                     progress,
                     activation_id,
@@ -324,8 +381,35 @@ class PersistentAgent:
                     round_number=round_number,
                 )
             for action in detected.actions:
-                self._raise_if_cancelled(activation_id, cancellation, progress, round_number)
+                self._raise_if_cancelled(
+                    activation_id, cancellation, progress, round_number
+                )
                 try:
+                    if action.kind == ActionKind.EVENT and unreported_event_matches:
+                        if event_recurrence == "once":
+                            raise EventError(
+                                "The one-shot event task already matched; report the occurrence and finish"
+                            )
+                        raise EventError(
+                            "Report the matched event occurrence with agent.report before waiting again"
+                        )
+                    if (
+                        action.kind == ActionKind.EVENT
+                        and event_recurrence == "once"
+                        and matched_event
+                    ):
+                        raise EventError(
+                            "The one-shot event task already reported; finish the task"
+                        )
+                    if (
+                        action.kind == ActionKind.EVENT
+                        and event_recurrence in {"rising", "falling"}
+                        and action.arguments.get("trigger") != event_recurrence
+                    ):
+                        raise EventError(
+                            f"Recurring {event_recurrence} event tasks must use "
+                            f"trigger='{event_recurrence}' for each wait"
+                        )
                     result = self._execute_action(
                         activation_id,
                         action,
@@ -333,10 +417,34 @@ class PersistentAgent:
                         cancellation=cancellation,
                         round_number=round_number,
                     )
+                    if (
+                        action.kind == ActionKind.EVENT
+                        and event_recurrence is not None
+                        and isinstance(result, Mapping)
+                        and result.get("status") == "matched"
+                    ):
+                        matched_event = True
+                        unreported_event_matches += 1
+                    if (
+                        action.kind == ActionKind.CONTROL
+                        and action.name == "agent.report"
+                        and isinstance(result, Mapping)
+                        and result.get("accepted") is True
+                        and unreported_event_matches
+                    ):
+                        unreported_event_matches -= 1
+                        if event_recurrence in {"rising", "falling"}:
+                            rounds_since_report = 0
                     tool_content = _action_content(result)
                 except AgentCancelled:
                     raise
-                except (ActionError, CapabilityError, EventError, ExecutorError, MemoryError) as exc:
+                except (
+                    ActionError,
+                    CapabilityError,
+                    EventError,
+                    ExecutorError,
+                    MemoryError,
+                ) as exc:
                     failed_kind: ProgressKind = {
                         ActionKind.EVENT: "event_completed",
                         ActionKind.EXECUTOR: "executor_failed",
@@ -356,15 +464,22 @@ class PersistentAgent:
                 self.memory.append_message(
                     self.agent_id,
                     activation_id,
-                    Message("tool", tool_content, name=action.call.name, tool_call_id=action.call.call_id),
+                    Message(
+                        "tool",
+                        tool_content,
+                        name=action.call.name,
+                        tool_call_id=action.call.call_id,
+                    ),
                 )
         self._emit(
             progress,
             activation_id,
             "activation_failed",
-            f"Maximum rounds reached ({self.max_rounds}).",
+            f"Maximum rounds without a completed occurrence report reached ({self.max_rounds}).",
         )
-        raise AgentActivationError(f"Agent exceeded maximum LLM rounds ({self.max_rounds})")
+        raise AgentActivationError(
+            f"Agent exceeded maximum LLM rounds without a completed occurrence report ({self.max_rounds})"
+        )
 
     def _execute_action(
         self,
@@ -376,18 +491,30 @@ class PersistentAgent:
         round_number: int,
     ) -> Any:
         if action.kind == ActionKind.CAPABILITY:
-            self._emit_started(progress, activation_id, "capability", action, round_number)
-            result = self.capabilities.execute(ToolCall(action.name, action.arguments, action.call.call_id))
-            self._emit_completed(progress, activation_id, "capability", action, round_number, result)
+            self._emit_started(
+                progress, activation_id, "capability", action, round_number
+            )
+            result = self.capabilities.execute(
+                ToolCall(action.name, action.arguments, action.call.call_id)
+            )
+            self._emit_completed(
+                progress, activation_id, "capability", action, round_number, result
+            )
             return result
         if action.kind == ActionKind.EVENT:
             if action.name not in {"wait", EVENT_WAIT_TOOL}:
                 raise ActionError(f"Unknown event action: {action.name}")
             timeout = action.arguments.get("timeout")
-            if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+            if (
+                not isinstance(timeout, (int, float))
+                or isinstance(timeout, bool)
+                or timeout <= 0
+            ):
                 raise EventError("Event timeout must be a positive number")
             if self.role == "main" and self.agent_control is not None and timeout > 1:
-                raise ActionError("Main-agent event waits over 1 second must be delegated to a worker")
+                raise ActionError(
+                    "Main-agent event waits over 1 second must be delegated to a worker"
+                )
             continuation_id = action.call.call_id or str(uuid4())
             self.memory.save_continuation(
                 continuation_id,
@@ -441,9 +568,13 @@ class PersistentAgent:
         if action.kind == ActionKind.EXECUTOR:
             if self.executors is None:
                 raise ActionError("Executor service is not available")
-            self._emit_started(progress, activation_id, "executor", action, round_number)
+            self._emit_started(
+                progress, activation_id, "executor", action, round_number
+            )
             result = self.executors.execute(action.name, action.arguments)
-            self._emit_completed(progress, activation_id, "executor", action, round_number, result)
+            self._emit_completed(
+                progress, activation_id, "executor", action, round_number, result
+            )
             return result
         if action.kind == ActionKind.CONTROL:
             if self.agent_control is None:
@@ -457,25 +588,43 @@ class PersistentAgent:
                 progress=progress,
                 origin_activation_id=activation_id,
             )
-            self._emit_completed(progress, activation_id, "control", action, round_number, result)
+            self._emit_completed(
+                progress, activation_id, "control", action, round_number, result
+            )
             return result
         if action.kind == ActionKind.MEMORY:
             self._emit_started(progress, activation_id, "memory", action, round_number)
-            result = self.memory_service.execute(self.agent_id, action.name, action.arguments)
-            self._emit_completed(progress, activation_id, "memory", action, round_number, result)
+            result = self.memory_service.execute(
+                self.agent_id, action.name, action.arguments
+            )
+            self._emit_completed(
+                progress, activation_id, "memory", action, round_number, result
+            )
             return result
         raise ActionError(f"Unsupported action kind: {action.kind}")
 
-    def _wait_for_event(self, action: ActionRequest, cancellation: CancellationToken) -> dict[str, Any]:
+    def _wait_for_event(
+        self, action: ActionRequest, cancellation: CancellationToken
+    ) -> dict[str, Any]:
         if self.event_service is None:
             raise EventError("Event service is not available")
         required = {"event", "operator", "expected", "timeout"}
-        if set(action.arguments) != required:
-            raise EventError(f"Event wait arguments must be exactly: {', '.join(sorted(required))}")
+        allowed = required | {"trigger"}
+        if not required.issubset(action.arguments) or set(action.arguments) - allowed:
+            raise EventError(
+                "Event wait arguments must include event, operator, expected, and timeout; "
+                "trigger is optional"
+            )
         event = action.arguments["event"]
         operator_name = action.arguments["operator"]
         timeout = action.arguments["timeout"]
-        if not isinstance(event, str) or not isinstance(operator_name, str) or not isinstance(timeout, (int, float)):
+        trigger = action.arguments.get("trigger", "level")
+        if (
+            not isinstance(event, str)
+            or not isinstance(operator_name, str)
+            or not isinstance(timeout, (int, float))
+            or trigger not in {"level", "rising", "falling"}
+        ):
             raise EventError("Event wait has invalid argument types")
         if self.event_names is not None and event not in self.event_names:
             raise EventError(f"Event is not assigned to this agent: {event}")
@@ -486,13 +635,18 @@ class PersistentAgent:
                 operator=operator_name,
                 expected=action.arguments["expected"],
                 timeout=float(timeout),
+                trigger=trigger,
                 is_cancelled=cancellation.is_cancelled,
             )
         except InterruptedError as exc:
             raise AgentCancelled("Activation interrupted during event wait") from exc
         return notification.as_dict()
 
-    def _runtime_context(self) -> dict[str, Any]:
+    def _runtime_context(
+        self,
+        *,
+        event_recurrence: Literal["once", "rising", "falling"] | None = None,
+    ) -> dict[str, Any]:
         event_context: list[dict[str, Any]] = []
         if self.events:
             allowed = set(self.event_names) if self.event_names is not None else None
@@ -505,23 +659,51 @@ class PersistentAgent:
             instruction = (
                 "You are the persistent device-wide main agent and the only agent that communicates with users. "
                 "Delegate specialist work and event waits longer than one second. Delegation returns immediately; "
-                "worker completion arrives later as a typed stimulus in the durable main inbox."
+                "each explicit worker report arrives immediately as a typed stimulus in the durable main inbox. "
+                "Treat a condition request as one-shot unless the user explicitly asks for every occurrence, each "
+                "time, whenever, or continuous monitoring. Preserve that intent in the delegated task."
             )
         else:
+            event_policy = {
+                "once": (
+                    "This event task is one-shot. After the first matched occurrence, call agent.report and finish. "
+                    "Do not wait for a reset or another occurrence."
+                ),
+                "rising": (
+                    "This event task is recurring. Use trigger=rising for every wait, call agent.report after every "
+                    "matched occurrence, and then continue with the next rising wait."
+                ),
+                "falling": (
+                    "This event task is recurring. Use trigger=falling for every wait, call agent.report after every "
+                    "matched occurrence, and then continue with the next falling wait."
+                ),
+            }.get(
+                event_recurrence,
+                "Follow the delegated task's explicit event lifecycle.",
+            )
             instruction = (
                 "You are a delegated worker. Use only assigned resources, perform long waits when needed, and report "
-                "a structured result with control agent.report."
+                "each matched occurrence immediately with control agent.report. A report does not end the task: "
+                "finish after the first report for a one-shot request, but continue with matching rising or falling "
+                f"edge waits only when the delegated task explicitly requests repeated occurrences. {event_policy}"
             )
         return {
             "agent": {"id": self.agent_id, "name": self.name, "role": self.role},
+            "event_recurrence": event_recurrence,
             "capabilities": self.capabilities.prompt_context(),
             "events": event_context,
             "executors": self.executors.prompt_context() if self.executors else [],
-            "control": self.agent_control.prompt_context(self) if self.agent_control else [],
+            "control": self.agent_control.prompt_context(self)
+            if self.agent_control
+            else [],
             "memory": list(self.memory_service.prompt_context()),
             "action_protocol": {
                 "preferred_tool": "pivot_action",
-                "shape": {"kind": "capability|event|control|executor|memory", "name": "operation", "arguments": {}},
+                "shape": {
+                    "kind": "capability|event|control|executor|memory",
+                    "name": "operation",
+                    "arguments": {},
+                },
                 "capability_kind_rule": "Use kind=capability for think, measure, and work capabilities.",
             },
             "instruction": instruction,
@@ -559,9 +741,23 @@ class PersistentAgent:
         if callback is None:
             return
         try:
-            callback(ActivationProgress(kind, self.agent_id, activation_id, message, round_number, name, result))
+            callback(
+                ActivationProgress(
+                    kind,
+                    self.agent_id,
+                    activation_id,
+                    message,
+                    round_number,
+                    name,
+                    result,
+                )
+            )
         except Exception as exc:
-            LOGGER.warning("Activation progress callback failed agent_id=%s error_type=%s", self.agent_id, type(exc).__name__)
+            LOGGER.warning(
+                "Activation progress callback failed agent_id=%s error_type=%s",
+                self.agent_id,
+                type(exc).__name__,
+            )
 
     def _emit_started(
         self,

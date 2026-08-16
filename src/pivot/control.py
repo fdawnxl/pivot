@@ -68,7 +68,9 @@ class PivotControl:
         if self._closed:
             raise ControlError("Control service is closed")
         try:
-            return self.reactor.inject(envelope, progress=progress, cancellation=cancellation)
+            return self.reactor.inject(
+                envelope, progress=progress, cancellation=cancellation
+            )
         except StimulusError as exc:
             raise ControlError(str(exc)) from exc
 
@@ -114,7 +116,9 @@ class PivotControl:
             raise StimulusError(completed.error or "Main-agent stimulus failed")
         return completed.response or ""
 
-    def wait_stimulus(self, stimulus_id: str, *, timeout: float | None = None) -> StimulusEnvelope:
+    def wait_stimulus(
+        self, stimulus_id: str, *, timeout: float | None = None
+    ) -> StimulusEnvelope:
         try:
             return self.inbox.wait(stimulus_id, timeout=timeout)
         except StimulusError as exc:
@@ -129,7 +133,9 @@ class PivotControl:
     def stimuli(self, *, limit: int = 100) -> tuple[StimulusEnvelope, ...]:
         return self.inbox.list(limit=limit)
 
-    def outputs(self, *, after_sequence: int = 0, limit: int = 100) -> tuple[OutputEnvelope, ...]:
+    def outputs(
+        self, *, after_sequence: int = 0, limit: int = 100
+    ) -> tuple[OutputEnvelope, ...]:
         return self.inbox.outputs(after_sequence=after_sequence, limit=limit)
 
     def cancel_stimulus(self, stimulus_id: str) -> bool:
@@ -146,6 +152,28 @@ class PivotControl:
     def runtime_snapshot(self) -> dict[str, Any]:
         config = self.runtime.config
         queued = self.inbox.pending_count()
+        agents = []
+        if self.runtime.agents is not None:
+            for record in self.runtime.agents.records():
+                agents.append(
+                    {
+                        "agent_id": record.agent_id,
+                        "name": record.name,
+                        "role": record.role.value,
+                        "parent_id": record.parent_id,
+                        "state": record.agent.state.value
+                        if record.role.value == "main"
+                        else record.state.value,
+                        "task": record.task,
+                        "task_id": record.task_id,
+                        "one_shot": record.one_shot,
+                        "capability_count": len(record.capabilities),
+                        "event_count": len(record.events),
+                        "report_available": record.report is not None,
+                        "error": record.error,
+                        "updated_at": record.updated_at,
+                    }
+                )
         return {
             "provider": config.provider.name,
             "model": config.provider.model,
@@ -155,17 +183,26 @@ class PivotControl:
             "queued_stimuli": queued,
             "capabilities": len(self.runtime.registry.descriptors()),
             "events": len(self.runtime.events.descriptors()),
-            "event_bridges": len(self.runtime.event_bridge.rules) if self.runtime.event_bridge else 0,
-            "dependencies": len(self.runtime.dependencies.descriptors()) if self.runtime.dependencies else 0,
+            "event_bridges": len(self.runtime.event_bridge.rules)
+            if self.runtime.event_bridge
+            else 0,
+            "dependencies": len(self.runtime.dependencies.descriptors())
+            if self.runtime.dependencies
+            else 0,
+            "agents": agents,
         }
 
     def request_reload(self) -> dict[str, Any]:
         """Validate current instance configuration and request an orderly host reload."""
 
         try:
-            candidate = PivotConfig.load(instance_path=self.runtime.config.instance_path)
+            candidate = PivotConfig.load(
+                instance_path=self.runtime.config.instance_path
+            )
         except Exception as exc:
-            raise ControlError(f"Configuration reload validation failed: {type(exc).__name__}: {exc}") from exc
+            raise ControlError(
+                f"Configuration reload validation failed: {type(exc).__name__}: {exc}"
+            ) from exc
         payload = {
             "requested_at": time.time(),
             "provider": candidate.provider.name,
@@ -192,7 +229,11 @@ class PivotControl:
             try:
                 listener(event, payload)
             except Exception as exc:
-                LOGGER.warning("Control listener failed event=%s error_type=%s", event, type(exc).__name__)
+                LOGGER.warning(
+                    "Control listener failed event=%s error_type=%s",
+                    event,
+                    type(exc).__name__,
+                )
 
 
 __all__ = ["ControlError", "PivotControl"]

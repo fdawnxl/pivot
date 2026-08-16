@@ -52,6 +52,8 @@ class PivotConfig:
     stimulus_max_pending: int = 1000
     stimulus_retention_seconds: float = 7 * 24 * 3600
     stimulus_priority_aging_seconds: float = 5.0
+    agent_worker_retention_seconds: float = 5 * 60
+    agent_worker_cleanup_interval: float = 30.0
     dependency_install_timeout: float = 300.0
     dependency_start_timeout: float = 15.0
     dependency_dbus_timeout: float = 1.0
@@ -64,7 +66,12 @@ class PivotConfig:
     log_file_level: str = "DEBUG"
 
     @classmethod
-    def load(cls, *, instance_path: str | Path | None = None, config_path: str | Path | None = None) -> "PivotConfig":
+    def load(
+        cls,
+        *,
+        instance_path: str | Path | None = None,
+        config_path: str | Path | None = None,
+    ) -> "PivotConfig":
         """Load config with env > TOML > defaults, then initialize instance."""
 
         explicit_instance = instance_path or os.getenv("PIVOT_INSTANCE_PATH")
@@ -72,7 +79,9 @@ class PivotConfig:
             raise ConfigurationError("PIVOT_INSTANCE_PATH or --instance is required")
         instance = Path(explicit_instance).expanduser().resolve()
         _ensure_instance(instance)
-        toml_file = Path(config_path).expanduser() if config_path else instance / "config.toml"
+        toml_file = (
+            Path(config_path).expanduser() if config_path else instance / "config.toml"
+        )
         values: dict[str, Any] = {}
         if toml_file.is_file():
             try:
@@ -80,9 +89,15 @@ class PivotConfig:
                     loaded = tomllib.load(handle)
                 values.update(loaded.get("pivot", loaded))
             except (OSError, tomllib.TOMLDecodeError) as exc:
-                raise ConfigurationError(f"Cannot load configuration {toml_file}: {exc}") from exc
+                raise ConfigurationError(
+                    f"Cannot load configuration {toml_file}: {exc}"
+                ) from exc
 
-        logging_values = values.get("logging", {}) if isinstance(values.get("logging", {}), dict) else {}
+        logging_values = (
+            values.get("logging", {})
+            if isinstance(values.get("logging", {}), dict)
+            else {}
+        )
         merged: dict[str, Any] = {**values, **logging_values}
         providers = CredentialStore(instance / "credentials.toml").read()
 
@@ -94,7 +109,9 @@ class PivotConfig:
             try:
                 return cast(value)
             except (TypeError, ValueError) as exc:
-                raise ConfigurationError(f"Invalid {env_name} value: {value!r}") from exc
+                raise ConfigurationError(
+                    f"Invalid {env_name} value: {value!r}"
+                ) from exc
 
         legacy_log_level = get("log_level", None)
         console_level = os.getenv("PIVOT_LOG_DISPLAY_LEVEL") or get(
@@ -105,10 +122,14 @@ class PivotConfig:
         )
         provider_name = get("provider", None)
         if not provider_name:
-            raise ConfigurationError("PIVOT_PROVIDER or config.toml provider is required")
+            raise ConfigurationError(
+                "PIVOT_PROVIDER or config.toml provider is required"
+            )
         provider = providers.get(provider_name)
         if provider is None:
-            raise ConfigurationError(f"Provider {provider_name!r} is not defined in credentials.toml")
+            raise ConfigurationError(
+                f"Provider {provider_name!r} is not defined in credentials.toml"
+            )
         config = cls(
             instance_path=instance,
             provider=provider,
@@ -116,21 +137,37 @@ class PivotConfig:
             llm_timeout=get("llm_timeout", 120.0, float),
             capability_timeout=get("capability_timeout", 15.0, float),
             executor_timeout=get("executor_timeout", 30.0, float),
-            executor_max_output_bytes=get("executor_max_output_bytes", 1024 * 1024, int),
+            executor_max_output_bytes=get(
+                "executor_max_output_bytes", 1024 * 1024, int
+            ),
             event_poll_interval=get("event_poll_interval", 1.0, float),
             event_max_wait=get("event_max_wait", 3600.0, float),
             stimulus_max_pending=get("stimulus_max_pending", 1000, int),
-            stimulus_retention_seconds=get("stimulus_retention_seconds", 7 * 24 * 3600, float),
-            stimulus_priority_aging_seconds=get("stimulus_priority_aging_seconds", 5.0, float),
+            stimulus_retention_seconds=get(
+                "stimulus_retention_seconds", 7 * 24 * 3600, float
+            ),
+            stimulus_priority_aging_seconds=get(
+                "stimulus_priority_aging_seconds", 5.0, float
+            ),
+            agent_worker_retention_seconds=get(
+                "agent_worker_retention_seconds", 5 * 60, float
+            ),
+            agent_worker_cleanup_interval=get(
+                "agent_worker_cleanup_interval", 30.0, float
+            ),
             dependency_install_timeout=get("dependency_install_timeout", 300.0, float),
             dependency_start_timeout=get("dependency_start_timeout", 15.0, float),
             dependency_dbus_timeout=get("dependency_dbus_timeout", 1.0, float),
             dependency_stop_timeout=get("dependency_stop_timeout", 5.0, float),
-            dbus_control_enabled=_parse_bool(get("dbus_control_enabled", True), setting="D-Bus control enabled"),
+            dbus_control_enabled=_parse_bool(
+                get("dbus_control_enabled", True), setting="D-Bus control enabled"
+            ),
             dbus_control_bus=get("dbus_control_bus", "session"),
             dbus_control_service=get("dbus_control_service", "org.pivot.Control"),
             dbus_control_start_timeout=get("dbus_control_start_timeout", 5.0, float),
-            log_console_level=_validate_log_level(console_level, setting="display log level"),
+            log_console_level=_validate_log_level(
+                console_level, setting="display log level"
+            ),
             log_file_level=_validate_log_level(file_level, setting="storage log level"),
         )
         if (
@@ -144,13 +181,17 @@ class PivotConfig:
             or config.stimulus_max_pending < 1
             or config.stimulus_retention_seconds <= 0
             or config.stimulus_priority_aging_seconds <= 0
+            or config.agent_worker_retention_seconds <= 0
+            or config.agent_worker_cleanup_interval <= 0
             or config.dependency_install_timeout <= 0
             or config.dependency_start_timeout <= 0
             or config.dependency_dbus_timeout <= 0
             or config.dependency_stop_timeout <= 0
             or config.dbus_control_start_timeout <= 0
         ):
-            raise ConfigurationError("max_rounds and timeouts must be greater than zero")
+            raise ConfigurationError(
+                "Numeric limits, intervals, and timeouts must be greater than zero"
+            )
         if config.dbus_control_bus not in {"session", "system"}:
             raise ConfigurationError("dbus_control_bus must be 'session' or 'system'")
         config.ensure_instance()
@@ -180,18 +221,18 @@ def _ensure_instance(instance_path: Path) -> None:
     """Bootstrap instance files before provider validation can fail."""
 
     for relative in (
-            "capabilities/think",
-            "capabilities/measure",
-            "capabilities/work",
-            "events",
-            "dependencies",
-            "memory",
-            "logs",
-            "environment/measure",
-            "environment/think",
-            "environment/work",
-            "environment/event",
-        ):
+        "capabilities/think",
+        "capabilities/measure",
+        "capabilities/work",
+        "events",
+        "dependencies",
+        "memory",
+        "logs",
+        "environment/measure",
+        "environment/think",
+        "environment/work",
+        "environment/event",
+    ):
         (instance_path / relative).mkdir(parents=True, exist_ok=True)
     for kind in ("think", "measure", "work", "event"):
         project = instance_path / "environment" / kind / "pyproject.toml"
@@ -202,4 +243,7 @@ def _ensure_instance(instance_path: Path) -> None:
             )
     config_file = instance_path / "config.toml"
     if not config_file.exists():
-        config_file.write_text("# pivot instance configuration\n# provider = \"provider-name\"\n", encoding="utf-8")
+        config_file.write_text(
+            '# pivot instance configuration\n# provider = "provider-name"\n',
+            encoding="utf-8",
+        )
