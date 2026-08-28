@@ -14,6 +14,7 @@ from pivot.logging import (
     configure_logging,
     configure_tui_logging,
     log_context,
+    observe,
 )
 
 
@@ -39,6 +40,19 @@ def test_logging_uses_independent_console_and_file_levels(tmp_path: Path) -> Non
         "failure detail",
     ]
     assert persisted[-1]["level"] == "ERROR"
+
+
+def test_observe_emits_structured_operational_event(tmp_path: Path) -> None:
+    log_path = tmp_path / "pivot.log"
+    configure_logging("error", file_level="info", log_path=log_path, stream=StringIO())
+    observe("stimulus.completed", value=1.5, count=2, detail={"secret": "hidden"})
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["event"] == "stimulus.completed"
+    assert record["fields"]["value"] == 1.5
+    assert record["fields"]["count"] == 2
+    assert "detail" not in record["fields"]
 
 
 def test_structured_logging_includes_correlation_context(tmp_path: Path) -> None:

@@ -33,6 +33,15 @@ _DEPENDENCY_LOGGERS = (
 )
 
 
+def observe(event: str, *, value: float | None = None, **fields: Any) -> None:
+    """Emit a uniform operational observation without exposing prompt contents."""
+
+    safe = {key: item for key, item in fields.items() if isinstance(item, (str, int, float, bool))}
+    if value is not None:
+        safe["value"] = value
+    logging.getLogger("pivot.observe").info(event, extra={"event": event, **safe})
+
+
 @contextmanager
 def log_context(**values: str | None) -> Iterator[None]:
     """Bind correlation fields to all logs emitted in the current context."""
@@ -187,5 +196,6 @@ __all__ = [
     "configure_logging",
     "configure_tui_logging",
     "log_context",
+    "observe",
     "parse_log_level",
 ]
