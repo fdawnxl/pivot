@@ -315,6 +315,18 @@ class StimulusInbox:
                 ),
             )
 
+    def discard_pending(self) -> int:
+        """Cancel queued work left by an intentional runtime shutdown."""
+
+        with self._condition, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE stimuli SET state = 'cancelled', error = ?, updated_at = ? "
+                "WHERE state IN ('queued', 'processing')",
+                ("Runtime was intentionally stopped; pending work was discarded", time.time()),
+            )
+            self._condition.notify_all()
+            return int(cursor.rowcount)
+
     def enqueue(
         self,
         envelope: StimulusEnvelope,

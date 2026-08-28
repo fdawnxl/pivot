@@ -49,6 +49,7 @@ class Runtime:
     inbox: StimulusInbox | None = None
     reactor: MainAgentReactor | None = None
     event_bridge: EventStimulusBridge | None = None
+    recovered_from_unclean_exit: bool = False
     _started: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _lifecycle_lock: threading.RLock = field(
@@ -74,6 +75,10 @@ class Runtime:
                     retention_seconds=self.config.stimulus_retention_seconds,
                     priority_aging_seconds=self.config.stimulus_priority_aging_seconds,
                 )
+                if not self.recovered_from_unclean_exit:
+                    discarded = self.inbox.discard_pending()
+                    if discarded:
+                        LOGGER.info("Discarded pending stimuli after intentional stop count=%d", discarded)
             if self.reactor is None:
                 self.reactor = MainAgentReactor(
                     self._main_agent, self.agents, self.inbox
@@ -125,6 +130,10 @@ def build_runtime(config: PivotConfig) -> Runtime:
 
     lease = RuntimeLease(config.instance_path)
     lease.acquire()
+    LOGGER.info(
+        "Runtime startup exit_status=%s",
+        "unclean" if lease.unexpected_exit else "clean",
+    )
     dependencies = DependencyManager(
         config.instance_path,
         install_timeout=config.dependency_install_timeout,
@@ -227,6 +236,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
             executors,
             agents,
             lease,
+            recovered_from_unclean_exit=lease.unexpected_exit,
         )
         runtime.start()
         return runtime

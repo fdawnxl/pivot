@@ -15,6 +15,20 @@ from pivot.stimuli import (
 )
 
 
+def test_discard_pending_cancels_intentional_shutdown_work(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path)
+    agent_id = store.main_agent_id()
+    inbox = StimulusInbox(store)
+    stimulus = StimulusEnvelope.from_mapping(
+        {"kind": "command", "source": "test", "payload": {"content": "later"}},
+        target_agent_id=agent_id,
+    )
+    inbox.enqueue(stimulus)
+    assert inbox.discard_pending() == 1
+    assert inbox.get(stimulus.stimulus_id).state == StimulusState.CANCELLED
+    store.close()
+
+
 def _envelope(
     agent_id: str, *, source: str, content: str, priority: int = 50, **extra: object
 ) -> StimulusEnvelope:
