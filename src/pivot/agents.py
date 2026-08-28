@@ -121,6 +121,8 @@ class AgentControl:
         self.event_service = event_service
         self.executors = executors
         self.max_rounds = max_rounds
+        if max_workers < 1:
+            raise ValueError("max_workers must be positive")
         if worker_retention_seconds <= 0 or worker_cleanup_interval <= 0:
             raise ValueError("Worker retention and cleanup interval must be positive")
         self.worker_retention_seconds = worker_retention_seconds

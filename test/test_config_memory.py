@@ -43,6 +43,20 @@ def test_instance_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
         PivotConfig.load()
 
 
+def test_config_rejects_mixed_root_and_pivot_layouts(tmp_path: Path) -> None:
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text(
+        'provider = "local"\n[pivot]\nmax_rounds = 3\n', encoding="utf-8"
+    )
+    CredentialStore(instance / "credentials.toml").save(
+        {"local": ProviderCredential("local", "local-model")}
+    )
+
+    with pytest.raises(ConfigurationError, match="either \[pivot\] or root-level"):
+        PivotConfig.load(instance_path=instance)
+
+
 def test_codex_files_are_not_runtime_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

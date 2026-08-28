@@ -43,6 +43,7 @@ class PivotConfig:
     instance_path: Path
     provider: ProviderCredential
     max_rounds: int = 8
+    max_workers: int = 4
     llm_timeout: float = 120.0
     capability_timeout: float = 15.0
     executor_timeout: float = 30.0
@@ -92,6 +93,12 @@ class PivotConfig:
                 raise ConfigurationError(
                     f"Cannot load configuration {toml_file}: {exc}"
                 ) from exc
+            if "pivot" in loaded:
+                root_keys = set(loaded) - {"pivot", "logging"}
+                if root_keys:
+                    raise ConfigurationError(
+                        "Configuration must use either [pivot] or root-level settings, not both"
+                    )
 
         logging_values = (
             values.get("logging", {})
@@ -134,6 +141,7 @@ class PivotConfig:
             instance_path=instance,
             provider=provider,
             max_rounds=get("max_rounds", 8, int),
+            max_workers=get("max_workers", 4, int),
             llm_timeout=get("llm_timeout", 120.0, float),
             capability_timeout=get("capability_timeout", 15.0, float),
             executor_timeout=get("executor_timeout", 30.0, float),
@@ -172,6 +180,7 @@ class PivotConfig:
         )
         if (
             config.max_rounds < 1
+            or config.max_workers < 1
             or config.llm_timeout <= 0
             or config.capability_timeout <= 0
             or config.executor_timeout <= 0

@@ -27,6 +27,7 @@ Required field: `model`. Optional fields: `api_base`, `api_key`. The selected na
 | --- | ---: | --- |
 | `provider` | required | Named table in `credentials.toml` |
 | `max_rounds` | `8` | Model/action rounds allowed per finite activation or recurring occurrence |
+| `max_workers` | `4` | Maximum concurrent worker activations |
 | `llm_timeout` | `120` | LLM request timeout in seconds |
 | `capability_timeout` | `15` | Capability and event script timeout |
 | `executor_timeout` | `30` | Maximum shell executor timeout |
@@ -47,7 +48,7 @@ Required field: `model`. Optional fields: `api_base`, `api_key`. The selected na
 | `dbus_control_service` | `org.pivot.Control` | Well-known control service name |
 | `dbus_control_start_timeout` | `5` | Control service startup timeout |
 
-All numeric limits and intervals must be positive. `stimulus_max_pending`, `executor_max_output_bytes`, and `max_rounds` must be positive integers.
+All numeric limits and intervals must be positive. `stimulus_max_pending`, `executor_max_output_bytes`, `max_rounds`, and `max_workers` must be positive integers.
 
 ## Logging
 
