@@ -28,6 +28,17 @@ class ProviderCredential:
     api_key: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ModelStrategyGroup:
+    """A named model policy with ordered provider fallback."""
+
+    name: str
+    description: str
+    capabilities: tuple[str, ...]
+    cost: str
+    providers: tuple[ProviderCredential, ...]
+
+
 class CredentialStore:
     """Load and atomically persist named providers in ``credentials.toml``."""
 
@@ -126,4 +137,9 @@ def _optional_string(
     return value
 
 
-__all__ = ["CredentialError", "CredentialStore", "ProviderCredential"]
+__all__ = [
+    "CredentialError",
+    "CredentialStore",
+    "ProviderCredential",
+    "ModelStrategyGroup",
+]

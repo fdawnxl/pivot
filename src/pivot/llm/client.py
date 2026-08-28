@@ -7,6 +7,7 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
+from ..credentials import ProviderCredential
 from ..logging import configure_dependency_logging
 from ..models import Message
 
@@ -35,12 +36,14 @@ class LiteLLMClient:
         api_key: str | None = None,
         timeout: float = 120.0,
         completion: Callable[..., Any] | None = None,
+        fallbacks: Sequence[ProviderCredential] = (),
     ) -> None:
         self.model = model
         self.api_base = api_base
         self.api_key = api_key
         self.timeout = timeout
         self._completion = completion
+        self.fallbacks = tuple(fallbacks)
 
     def complete(
         self, messages: Sequence[Message], *, tools: Sequence[dict[str, Any]] = ()
@@ -84,15 +87,31 @@ class LiteLLMClient:
             self.timeout,
             [message.role for message in messages],
         )
-        try:
-            response = completion(**kwargs)
-        except Exception as exc:
-            LOGGER.error(
-                "LLM request failed model=%s error_type=%s",
-                self.model,
-                type(exc).__name__,
-            )
-            raise LLMError(f"LLM request failed: {type(exc).__name__}") from exc
+        providers = (
+            ProviderCredential("primary", self.model, self.api_base, self.api_key),
+            *self.fallbacks,
+        )
+        last: Exception | None = None
+        for provider in providers:
+            attempt = {**kwargs, "model": provider.model}
+            if provider.api_base:
+                attempt["api_base"] = provider.api_base
+            if provider.api_key:
+                attempt["api_key"] = provider.api_key
+            try:
+                response = completion(**attempt)
+                break
+            except Exception as exc:
+                last = exc
+                LOGGER.warning(
+                    "LLM provider failed model=%s error_type=%s",
+                    provider.model,
+                    type(exc).__name__,
+                )
+        else:
+            raise LLMError(
+                f"LLM request failed: {type(last).__name__ if last else 'UnknownError'}"
+            ) from last
         LOGGER.info("LLM request completed model=%s", self.model)
         return response
 

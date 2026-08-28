@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .credentials import CredentialStore, ProviderCredential
+from .credentials import CredentialStore, ModelStrategyGroup, ProviderCredential
 from .logging import configure_logging
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +42,8 @@ def _parse_bool(value: Any, *, setting: str) -> bool:
 class PivotConfig:
     instance_path: Path
     provider: ProviderCredential
+    model_groups: tuple[ModelStrategyGroup, ...] = ()
+    main_model_group: str | None = None
     max_rounds: int = 8
     max_workers: int = 4
     llm_timeout: float = 120.0
@@ -137,9 +139,34 @@ class PivotConfig:
             raise ConfigurationError(
                 f"Provider {provider_name!r} is not defined in credentials.toml"
             )
+        raw_groups = merged.get("model_groups", {})
+        groups: list[ModelStrategyGroup] = []
+        if isinstance(raw_groups, dict):
+            for name, raw in raw_groups.items():
+                if not isinstance(raw, dict):
+                    raise ConfigurationError("model_groups entries must be tables")
+                names = raw.get("providers", [])
+                if not isinstance(names, list) or not names:
+                    raise ConfigurationError(f"Model group {name!r} needs providers")
+                selected = tuple(providers[item] for item in names if item in providers)
+                if len(selected) != len(names):
+                    raise ConfigurationError(
+                        f"Model group {name!r} references unknown provider"
+                    )
+                groups.append(
+                    ModelStrategyGroup(
+                        str(name),
+                        str(raw.get("description", "")),
+                        tuple(map(str, raw.get("capabilities", []))),
+                        str(raw.get("cost", "unspecified")),
+                        selected,
+                    )
+                )
         config = cls(
             instance_path=instance,
             provider=provider,
+            model_groups=tuple(groups),
+            main_model_group=get("main_model_group", None),
             max_rounds=get("max_rounds", 8, int),
             max_workers=get("max_workers", 4, int),
             llm_timeout=get("llm_timeout", 120.0, float),

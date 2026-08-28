@@ -107,6 +107,25 @@ def test_selected_provider_must_exist(tmp_path: Path) -> None:
         PivotConfig.load(instance_path=instance)
 
 
+def test_model_strategy_group_loads_ordered_provider_fallback(tmp_path: Path) -> None:
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    (instance / "config.toml").write_text(
+        'provider = "local"\nmain_model_group = "vision"\n'
+        '[model_groups.vision]\ndescription = "visual tasks"\ncapabilities = ["vision"]\ncost = "medium"\nproviders = ["local", "backup"]\n',
+        encoding="utf-8",
+    )
+    CredentialStore(instance / "credentials.toml").save(
+        {
+            "local": ProviderCredential("local", "local-model"),
+            "backup": ProviderCredential("backup", "backup-model"),
+        }
+    )
+    config = PivotConfig.load(instance_path=instance)
+    assert config.main_model_group == "vision"
+    assert config.model_groups[0].providers[1].model == "backup-model"
+
+
 def test_missing_provider_still_bootstraps_empty_instance(tmp_path: Path) -> None:
     instance = tmp_path / "new-instance"
     with pytest.raises(ConfigurationError, match="provider is required"):

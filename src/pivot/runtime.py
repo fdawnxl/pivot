@@ -78,7 +78,10 @@ class Runtime:
                 if not self.recovered_from_unclean_exit:
                     discarded = self.inbox.discard_pending()
                     if discarded:
-                        LOGGER.info("Discarded pending stimuli after intentional stop count=%d", discarded)
+                        LOGGER.info(
+                            "Discarded pending stimuli after intentional stop count=%d",
+                            discarded,
+                        )
             if self.reactor is None:
                 self.reactor = MainAgentReactor(
                     self._main_agent, self.agents, self.inbox
@@ -177,11 +180,15 @@ def build_runtime(config: PivotConfig) -> Runtime:
             poll_interval=config.event_poll_interval,
             max_wait=config.event_max_wait,
         )
+        selected_group = next(
+            (g for g in config.model_groups if g.name == config.main_model_group), None
+        )
         llm = LiteLLMClient(
             config.provider.model,
             api_base=config.provider.api_base,
             api_key=config.provider.api_key,
             timeout=config.llm_timeout,
+            fallbacks=selected_group.providers[1:] if selected_group else (),
         )
         executors = ExecutorRegistry()
         executors.register(

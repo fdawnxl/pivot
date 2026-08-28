@@ -322,7 +322,10 @@ class StimulusInbox:
             cursor = self._connection.execute(
                 "UPDATE stimuli SET state = 'cancelled', error = ?, updated_at = ? "
                 "WHERE state IN ('queued', 'processing')",
-                ("Runtime was intentionally stopped; pending work was discarded", time.time()),
+                (
+                    "Runtime was intentionally stopped; pending work was discarded",
+                    time.time(),
+                ),
             )
             self._condition.notify_all()
             return int(cursor.rowcount)
