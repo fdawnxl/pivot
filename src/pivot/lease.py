@@ -22,6 +22,13 @@ class RuntimeLease:
         self.instance_path = Path(instance_path).expanduser().resolve()
         self.path = self.instance_path / "runtime.lock"
         self._handle: TextIO | None = None
+        self._unexpected_exit = False
+
+    @property
+    def unexpected_exit(self) -> bool:
+        """Whether the previous owner did not complete a clean release."""
+
+        return self._unexpected_exit
 
     @property
     def acquired(self) -> bool:
@@ -37,10 +44,13 @@ class RuntimeLease:
         self.instance_path.mkdir(parents=True, exist_ok=True)
         try:
             handle = self.path.open("a+", encoding="utf-8")
+            handle.seek(0)
+            previous = handle.read().splitlines()
+            self._unexpected_exit = bool(previous and previous[-1].strip() != "clean")
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             handle.seek(0)
             handle.truncate()
-            handle.write(f"{os.getpid()}\n")
+            handle.write(f"running pid={os.getpid()}\n")
             handle.flush()
             os.fsync(handle.fileno())
         except BlockingIOError as exc:
@@ -69,6 +79,11 @@ class RuntimeLease:
             return
         self._handle = None
         try:
+            handle.seek(0)
+            handle.truncate()
+            handle.write("clean\n")
+            handle.flush()
+            os.fsync(handle.fileno())
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
