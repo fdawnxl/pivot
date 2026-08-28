@@ -205,6 +205,7 @@ def build_runtime(config: PivotConfig) -> Runtime:
             event_service=event_service,
             executors=executors,
             max_rounds=config.max_rounds,
+            max_workers=config.max_workers,
             worker_retention_seconds=config.agent_worker_retention_seconds,
             worker_cleanup_interval=config.agent_worker_cleanup_interval,
         )
@@ -256,7 +257,6 @@ class PivotClient:
         from .control import PivotControl
 
         self.runtime = runtime
-        self.runtime.start()
         self.control = PivotControl(runtime)
         self._dbus_service: object | None = None
         self._closed = False
