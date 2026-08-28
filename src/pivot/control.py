@@ -155,25 +155,17 @@ class PivotControl:
         agents = []
         if self.runtime.agents is not None:
             for record in self.runtime.agents.records():
-                agents.append(
-                    {
-                        "agent_id": record.agent_id,
-                        "name": record.name,
-                        "role": record.role.value,
-                        "parent_id": record.parent_id,
-                        "state": record.agent.state.value
-                        if record.role.value == "main"
-                        else record.state.value,
-                        "task": record.task,
-                        "task_id": record.task_id,
-                        "one_shot": record.one_shot,
-                        "capability_count": len(record.capabilities),
-                        "event_count": len(record.events),
-                        "report_available": record.report is not None,
-                        "error": record.error,
-                        "updated_at": record.updated_at,
-                    }
-                )
+                item = record.as_dict()
+                item.pop("capabilities", None)
+                item.pop("events", None)
+                item.pop("recurrence", None)
+                item.pop("report", None)
+                item.pop("report_revision", None)
+                item.pop("created_at", None)
+                item["capability_count"] = len(record.capabilities)
+                item["event_count"] = len(record.events)
+                item["report_available"] = record.report is not None
+                agents.append(item)
         return {
             "provider": config.provider.name,
             "model": config.provider.model,
