@@ -2,6 +2,14 @@
 
 This documentation is organized around two different jobs. Framework contributors need to understand why pivot is structured as it is and where runtime responsibilities live. Device developers need a practical contract for building an instance without importing pivot internals.
 
+## Documentation conventions
+
+- Framework documents describe implementation ownership and invariants. Instance documents define the supported integration protocol.
+- `must` identifies a requirement enforced by pivot or required for interoperability; `should` identifies an operational recommendation.
+- Paths beginning with `instance/` are relative to the configured instance directory. Python paths beginning with `pivot.` refer to framework modules.
+- Configuration names are written as `config.toml` keys. Environment overrides use the corresponding `PIVOT_<UPPERCASE_NAME>` form unless a section says otherwise.
+- Behavior changes must update the document that owns the affected contract and its protocol tests. Environment setup and local tool-install notes do not belong in these documents.
+
 ## Framework design and implementation
 
 Read this section when changing pivot itself:
@@ -32,3 +40,4 @@ Read this section when adapting pivot to an intelligent terminal or device:
 - **capability**: a `think`, `measure`, or `work` extension supplied by an instance.
 - **dependency**: a long-running external uv project managed by pivot.
 - **adapter**: a device-facing process that injects stimuli or consumes outputs through the control interface.
+- **model strategy group**: an ordered provider fallback policy selected for the main Agent.

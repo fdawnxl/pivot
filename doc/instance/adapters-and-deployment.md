@@ -116,6 +116,10 @@ Inspect:
 
 `RequestReload` validates changed configuration and asks the pivot host to rebuild the runtime. Changes to dependencies, environments, credentials, capabilities, or event scripts should be applied through an orderly reload or restart.
 
+An orderly stop marks `runtime.lock` clean. On the next clean start, pivot cancels queued work and replay-safe processing work; replay-unsafe processing work becomes failed. Adapters should treat an orderly restart as a new submission boundary. After a process crash or power loss, queued work is retained, processing work is replayed only when `replay_safe=true`, and unsafe processing work becomes failed. Always inspect durable stimulus state rather than assuming a restart retried a request.
+
+Framework logs are JSON Lines in `logs/pivot.log`. Operational observations use logger `pivot.observe` with a stable event name, optional numeric value, and scalar dimensions. Framework extensions should not put prompts, media, credentials, or nested sensitive objects in observation fields. See [Runtime and extension boundaries](../framework/runtime.md#operational-observations) for the framework-side contract.
+
 ## Deployment checklist
 
 - The instance path is explicit and stored on persistent writable media.
@@ -127,4 +131,5 @@ Inspect:
 - Adapter output cursors survive process restart.
 - Logs rotate and do not contain secrets or raw sensitive media.
 - Shutdown releases dependencies, SQLite, and `runtime.lock` cleanly.
+- Restart handling matches each adapter's replay and resubmission policy.
 - Physical actions have an external fail-safe beyond model behavior.

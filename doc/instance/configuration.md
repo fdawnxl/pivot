@@ -21,11 +21,31 @@ api_key = "secret"
 
 Required field: `model`. Optional fields: `api_base`, `api_key`. The selected name comes from `provider` or `PIVOT_PROVIDER`. pivot forces the credentials file to mode `0600` when it reads or writes it.
 
+## Model strategy groups
+
+The selected `provider` is always the main Agent's primary provider. A model strategy group adds ordered fallbacks:
+
+```toml
+provider = "edge"
+main_model_group = "interactive"
+
+[model_groups.interactive]
+description = "Low-latency interaction with a cloud fallback"
+capabilities = ["text", "tool_use"]
+cost = "medium"
+providers = ["edge", "cloud"]
+```
+
+Every name in `providers` must reference a table in `credentials.toml`. Put the selected `provider` first: the runtime uses `provider` as the primary and tries entries after the first group member in order when a request raises an exception. If all attempts fail, the activation receives a sanitized `LLMError`.
+
+`description`, `capabilities`, and `cost` are strategy metadata retained in `PivotConfig`; they do not currently select a group or route individual requests automatically. `main_model_group` selects the group used by the main Agent. Without it, or when it does not match a defined group, only `provider` is used. Strategy group tables are configured in TOML; `PIVOT_MAIN_MODEL_GROUP` can override the selected group.
+
 ## Runtime settings
 
 | `config.toml` key | Default | Purpose |
 | --- | ---: | --- |
 | `provider` | required | Named table in `credentials.toml` |
+| `main_model_group` | unset | Named ordered fallback group for the main Agent |
 | `max_rounds` | `8` | Model/action rounds allowed per finite activation or recurring occurrence |
 | `max_workers` | `4` | Maximum concurrent worker activations |
 | `llm_timeout` | `120` | LLM request timeout in seconds |
@@ -66,7 +86,9 @@ Terminal logs are human-readable. `logs/pivot.log` uses JSON Lines, rotates at 5
 
 ```toml
 provider = "edge"
+main_model_group = "interactive"
 max_rounds = 10
+max_workers = 4
 llm_timeout = 60
 capability_timeout = 8
 executor_timeout = 10
@@ -87,9 +109,15 @@ dbus_control_bus = "session"
 dbus_control_service = "org.pivot.Control"
 dbus_control_start_timeout = 5
 
+[model_groups.interactive]
+description = "Prefer the on-device model and fall back to cloud"
+capabilities = ["text", "tool_use"]
+cost = "medium"
+providers = ["edge", "cloud"]
+
 [logging]
 display_level = "info"
 storage_level = "debug"
 ```
 
-Environment overrides are useful for deployment-specific values, but provider secrets still belong in the instance credentials file rather than ordinary configuration or logs.
+Environment overrides are useful for deployment-specific scalar values, but provider secrets still belong in the instance credentials file rather than ordinary configuration or logs. Structured tables such as `model_groups` remain in `config.toml`.

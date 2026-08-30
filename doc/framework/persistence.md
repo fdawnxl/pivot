@@ -58,7 +58,14 @@ Default priorities are command 50, worker report 40, system 30, observation 20, 
 
 Observations default to `delivery=state`: they update world state without an LLM activation and are replay-safe by default. Other kinds default to `delivery=activate` and replay-unsafe.
 
-After an unclean restart, a processing stimulus returns to the queue only when `replay_safe=true`. Unsafe work is marked failed because an external side effect may already have happened.
+Startup distinguishes a clean previous release from an unclean exit using `runtime.lock`:
+
+| Previous exit | Queued stimuli | Processing, replay-safe | Processing, replay-unsafe |
+| --- | --- | --- | --- |
+| Clean or first start | Cancelled as intentionally abandoned | Returned to `queued`, then cancelled | Marked `failed` |
+| Unclean | Remain queued | Returned to `queued` | Marked `failed` |
+
+Unsafe processing work is never replayed automatically because an external side effect may already have happened. Clean startup cancels remaining queued work because a deliberate stop is an ownership boundary; clients must submit new work after restart. Terminal stimuli and outputs remain available until retention pruning.
 
 Stimulus state is `queued`, `processing`, then `completed`, `failed`, or `cancelled`. The queue is bounded and terminal rows are removed after the configured retention period.
 

@@ -21,7 +21,13 @@ If assembly fails, already-created resources are closed in reverse ownership ord
 
 `LiteLLMClient` is the only module that imports LiteLLM, and it does so lazily. It accepts pivot `Message` objects and returns an untrusted provider response. `parse_response` extracts user-facing content and normalized `ToolCall` values from dict-like or object-like OpenAI-compatible responses.
 
+The configured `provider` is the primary connection. When `main_model_group` selects a strategy group, the client tries the group's remaining providers in declared order after the primary raises an exception. Each attempt uses that provider's model, endpoint, and key with the same request timeout and tools. Failure messages are sanitized and never include credentials or prompt content. Strategy metadata is not yet an automatic task router.
+
 Media content is preserved as provider-compatible parts. Because OpenAI-compatible APIs do not consistently accept media in a `tool` role, media returned by a capability is kept with the tool result for persistence and moved to a synthetic following `user` message at the provider boundary.
+
+## Operational observations
+
+`pivot.logging.observe` is the framework entry point for metric-like operational events. It writes through logger `pivot.observe` using a stable event name in both the message and `event` field, an optional numeric `value`, and scalar dimension fields. Non-scalar fields are discarded. Callers must not include credentials, prompt content, hidden reasoning, or raw media. The helper defines a log shape; pivot does not maintain a fixed catalog of observation event names yet.
 
 ## Capability boundary
 
@@ -69,3 +75,5 @@ Dependencies own their device or network protocol. pivot only manages their life
 `Runtime.close` is idempotent and closes bridge subscriptions, the main reactor, worker control, the main Agent, event polling, dependencies, the inbox, the database, and finally the lease. `PivotClient.close` first stops its optional D-Bus service, then closes the control facade and runtime.
 
 Cleanup intentionally continues after ordinary component errors and raises an `ExceptionGroup` after all release steps have been attempted.
+
+The lease file records `running` while the runtime owns the instance and `clean` after a successful release. Startup uses that marker to distinguish an intentional stop from an unexpected exit and applies the stimulus recovery policy documented in [Persistence and stimuli](persistence.md).
