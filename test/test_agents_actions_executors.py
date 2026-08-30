@@ -389,11 +389,11 @@ def test_worker_completion_reenters_main_agent_as_typed_stimulus(
                 if item.kind == "worker_report"
             ]
             if candidates:
+                remaining = deadline - time.monotonic()
                 completion_stimulus = client.control.wait_stimulus(
-                    candidates[-1].stimulus_id, timeout=0.2
+                    candidates[-1].stimulus_id, timeout=max(remaining, 0)
                 )
-                if completion_stimulus.state not in {"queued", "processing"}:
-                    break
+                break
             time.sleep(0.01)
         assert completion_stimulus is not None
         assert completion_stimulus.state == "completed"

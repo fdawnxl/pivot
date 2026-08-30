@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,16 @@ from pivot.ui import RuntimeSummary, render_banner, safe_endpoint
 class EchoLLM:
     def complete(self, messages, *, tools=()):
         return {"choices": [{"message": {"content": "ack"}}]}
+
+
+async def _wait_for(
+    pilot: Any, predicate: Callable[[], bool], *, timeout: float = 2.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            pytest.fail("Timed out waiting for asynchronous UI state")
+        await pilot.pause(0.01)
 
 
 def _runtime(tmp_path: Path, llm: Any | None = None) -> Runtime:
@@ -232,7 +244,9 @@ async def test_textual_cli_keeps_meaningful_capability_workflow(tmp_path: Path) 
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "measure it"
         await pilot.press("enter")
-        await pilot.pause(0.3)
+        await _wait_for(
+            pilot, lambda: bool(app.turns) and all(t.done for t in app.turns.values())
+        )
         workflow = app.query_one(WorkflowView)
         assert [
             (step.kind, step.name, step.state) for step in workflow.state.steps
@@ -275,13 +289,25 @@ async def test_textual_cli_queues_messages_while_main_agent_runs(
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "first"
         await pilot.press("enter")
-        assert started.wait(timeout=1)
+        await _wait_for(pilot, started.is_set)
         prompt.text = "second"
         await pilot.press("enter")
         await pilot.pause(0.05)
         assert "1 queued" in str(app.query_one("#agent-state").render())
         release.set()
-        await pilot.pause(0.8)
+        await _wait_for(
+            pilot,
+            lambda: (
+                len(
+                    [
+                        item
+                        for item in app.query(AgentMessage)
+                        if item.role == "assistant"
+                    ]
+                )
+                == 2
+            ),
+        )
         assert prompts == ["first", "second"]
         assert [
             item.content for item in app.query(AgentMessage) if item.role == "assistant"
@@ -309,12 +335,12 @@ async def test_textual_cli_interrupts_active_activation(tmp_path: Path) -> None:
         prompt = app.query_one("#prompt", PromptEditor)
         prompt.text = "long task"
         await pilot.press("enter")
-        assert started.wait(timeout=1)
+        await _wait_for(pilot, started.is_set)
         await pilot.press("ctrl+g")
         turn = app.turns[app.agent_activations[app.main_agent_id][0]]
         assert turn.cancellation.is_cancelled()
         release.set()
-        await pilot.pause(0.3)
+        await _wait_for(pilot, lambda: turn.done)
         assert turn.interrupted
         assert all(
             message.content != "late response" for message in app.query(AgentMessage)
