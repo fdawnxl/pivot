@@ -46,6 +46,8 @@ work:    script.py -l        descriptor
 
 Think capabilities are prompt methods and have no execution side effect. Their full text is lazy-loaded through `pivot_read_think`. Measure and work capabilities are model-callable tools. All results must be JSON serializable; a result may contain `{"content": [...]}` to return multimodal evidence.
 
+The reserved think capability name `global_policy` is an exception to lazy loading: when discovered, its body is injected as a system prompt for the main Agent only. Workers never receive this automatic global policy prompt.
+
 Capability subprocesses use `environment/<kind>` as their uv project, the instance as cwd, a restricted inherited environment, a timeout, and an output limit. One invalid script is skipped without preventing other capabilities from loading.
 
 ## Executor boundary

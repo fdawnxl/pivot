@@ -278,6 +278,9 @@ class PersistentAgent:
         unreported_event_matches = 0
         round_number = 0
         rounds_since_report = 0
+        global_policy = (
+            self.capabilities.global_policy() if self.role == "main" else None
+        )
         while rounds_since_report < self.max_rounds:
             round_number += 1
             rounds_since_report += 1
@@ -306,6 +309,7 @@ class PersistentAgent:
                     runtime_context=self._runtime_context(
                         event_recurrence=event_recurrence
                     ),
+                    system_prompt=global_policy,
                 )
                 raw = self.llm.complete(messages, tools=tools)
                 self._raise_if_cancelled(

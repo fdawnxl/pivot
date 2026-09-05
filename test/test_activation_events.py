@@ -14,7 +14,7 @@ from pivot.activation import (
     CancellationToken,
     PersistentAgent,
 )
-from pivot.capabilities import CapabilityRegistry
+from pivot.capabilities import GLOBAL_POLICY_THINK_NAME, CapabilityRegistry
 from pivot.events import (
     EVENT_WAIT_TOOL,
     EventBridgeRule,
@@ -86,6 +86,63 @@ def test_activation_executes_tools_and_persists_in_sqlite(tmp_path: Path) -> Non
         agent_id, llm=ToolLLM(), capabilities=registry, memory=memory, max_rounds=3
     )
     assert restored.history == agent.history
+    memory.close()
+
+
+def test_global_policy_is_injected_for_main_agent_only(tmp_path: Path) -> None:
+    registry = CapabilityRegistry()
+    reads = []
+    registry.register_think(
+        CapabilityDescriptor(
+            GLOBAL_POLICY_THINK_NAME,
+            "think",
+            "Instance-wide policy",
+        ),
+        lambda: reads.append("read") or "Always protect the operator.",
+    )
+
+    class CapturingLLM:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def complete(self, messages, *, tools=()):
+            self.messages.append(tuple(messages))
+            return {"choices": [{"message": {"content": "done"}}]}
+
+    memory = RuntimeStore(tmp_path / "memory")
+    main_llm = CapturingLLM()
+    main = PersistentAgent(
+        memory.main_agent_id(), llm=main_llm, capabilities=registry, memory=memory
+    )
+    assert main._activate("hello") == "done"
+    assert reads == ["read"]
+    assert [message.content for message in main_llm.messages[0][:2]] == [
+        "Always protect the operator.",
+        next(
+            message.content
+            for message in main_llm.messages[0]
+            if message.content.startswith("pivot runtime context:")
+        ),
+    ]
+
+    worker_llm = CapturingLLM()
+    worker_id = memory.create_worker(
+        name="worker", parent_id=main.agent_id, capabilities=(), events=()
+    )
+    worker = PersistentAgent(
+        worker_id,
+        llm=worker_llm,
+        capabilities=registry,
+        memory=memory,
+        role="worker",
+        name="worker",
+    )
+    assert worker._activate("hello", source="delegation") == "done"
+    assert reads == ["read"]
+    assert all(
+        message.content != "Always protect the operator."
+        for message in worker_llm.messages[0]
+    )
     memory.close()
 
 

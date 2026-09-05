@@ -15,6 +15,7 @@ from ..models import CapabilityDescriptor, CapabilityKind, ToolCall
 
 LOGGER = logging.getLogger(__name__)
 THINK_READER_NAME = "pivot_read_think"
+GLOBAL_POLICY_THINK_NAME = "global_policy"
 _MAX_OUTPUT_BYTES = 1024 * 1024
 
 
@@ -211,7 +212,14 @@ class CapabilityRegistry:
         descriptor: CapabilityDescriptor,
         handler: Callable[..., Any] | None = None,
     ) -> None:
-        if descriptor.name in self._descriptors or descriptor.name == THINK_READER_NAME:
+        if (
+            descriptor.name in self._descriptors
+            or descriptor.name == THINK_READER_NAME
+            or (
+                descriptor.name == GLOBAL_POLICY_THINK_NAME
+                and descriptor.kind != "think"
+            )
+        ):
             raise CapabilityError(
                 f"Capability already registered or reserved: {descriptor.name}"
             )
@@ -240,6 +248,26 @@ class CapabilityRegistry:
             raise CapabilityError("Lazy think reader requires a think descriptor")
         self.register(descriptor)
         self._think_readers[descriptor.name] = reader
+
+    def global_policy(self) -> str | None:
+        """Read the optional main-agent global policy think capability."""
+
+        reader = self._think_readers.get(GLOBAL_POLICY_THINK_NAME)
+        if reader is None:
+            return None
+        try:
+            content = reader()
+        except CapabilityError:
+            raise
+        except Exception as exc:
+            raise CapabilityError(
+                f"Unable to read think capability {GLOBAL_POLICY_THINK_NAME}: {type(exc).__name__}"
+            ) from exc
+        if not isinstance(content, str) or not content.strip():
+            raise CapabilityError(
+                f"Think capability {GLOBAL_POLICY_THINK_NAME} returned an empty body"
+            )
+        return content
 
     def descriptors(
         self, kind: CapabilityKind | None = None
@@ -387,6 +415,7 @@ __all__ = [
     "CapabilityError",
     "CapabilityRegistry",
     "CapabilityScriptRunner",
+    "GLOBAL_POLICY_THINK_NAME",
     "MeasureRunner",
     "THINK_READER_NAME",
 ]

@@ -51,6 +51,10 @@ else:
 
 pivot injects only the summary at first. The model calls `pivot_read_think` to load the full body when needed.
 
+### Main-Agent global policy
+
+The fixed think capability name `global_policy` is reserved for an optional instance-wide policy. When a think capability uses this name, pivot reads its body and injects it as a system prompt for every main-Agent activation. The body is not injected for workers; worker context remains limited to each worker's assigned resources. If no `global_policy` capability is present, no additional prompt is injected.
+
 ## Measure capability
 
 A measure capability reads one named fact. `-r <feature>` must emit any JSON value.

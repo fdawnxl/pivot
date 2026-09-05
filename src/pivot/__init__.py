@@ -2,6 +2,7 @@
 
 from .actions import ACTION_TOOL, ActionDetector, ActionKind, ActionRequest
 from .activation import ActivationState, AgentCancelled, CancellationToken
+from .capabilities import GLOBAL_POLICY_THINK_NAME
 from .config import PivotConfig
 from .control import ControlError, PivotControl
 from .dbus_control import ControlDBusService
@@ -45,6 +46,7 @@ __all__ = [
     "ExecutorError",
     "ExecutorDescriptor",
     "ExecutorRegistry",
+    "GLOBAL_POLICY_THINK_NAME",
     "PivotClient",
     "PivotConfig",
     "PivotControl",

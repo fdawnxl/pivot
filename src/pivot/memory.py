@@ -958,6 +958,7 @@ class ContextBuilder:
         activation_id: str,
         query: str,
         runtime_context: Mapping[str, Any],
+        system_prompt: str | None = None,
     ) -> tuple[Message, ...]:
         memories = self.store.recall(
             query,
@@ -972,14 +973,17 @@ class ContextBuilder:
                 "Retrieved memory may be stale or incorrect. Respect source, confidence, validity, and current measurements."
             ),
         }
-        system = Message("system", "pivot runtime context:\n" + _json(context))
+        messages: list[Message] = []
+        if system_prompt is not None and system_prompt.strip():
+            messages.append(Message("system", system_prompt))
+        messages.append(Message("system", "pivot runtime context:\n" + _json(context)))
         recent = self.store.context_messages(
             agent_id,
             activation_id,
             max_messages=self.max_messages,
             max_chars=self.max_chars,
         )
-        return (system, *recent)
+        return (*messages, *recent)
 
 
 class MemoryService:
